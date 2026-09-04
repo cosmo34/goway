@@ -106,8 +106,8 @@
       "eas": {
         "projectId": "REPLACE_AFTER_EAS_INIT"
       },
-      "privacyPolicyUrl": "https://cosmo34.github.io/goway/privacy/",
-      "supportUrl": "https://cosmo34.github.io/goway/support/"
+      "privacyPolicyUrl": "https://picaza.fr/privacy/goway/",
+      "supportUrl": "https://picaza.fr/support/goway/"
     },
     "experiments": {
       "typedRoutes": true

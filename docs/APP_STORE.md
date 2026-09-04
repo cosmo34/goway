@@ -6,12 +6,14 @@ Après activation de GitHub Pages (source : dossier `/docs`, branche `main`) :
 
 | Usage App Store Connect | URL |
 |-------------------------|-----|
-| **Privacy Policy** | https://cosmo34.github.io/goway/privacy/ |
-| **Support URL** | https://cosmo34.github.io/goway/support/ |
-| Marketing (optionnel) | https://cosmo34.github.io/goway/ |
+| **Privacy Policy** | https://picaza.fr/privacy/goway/ |
+| **Support URL** | https://picaza.fr/support/goway/ |
+| Marketing (optionnel) | https://picaza.fr/ |
 
-Versions par langue : `/privacy/fr.html`, `/privacy/en.html`, `/support/ar.html`, etc.  
-Langues : **fr, en, es, de, it, zh, ar**.
+Versions EN : `/privacy/goway/index.en.html`, etc.  
+Pages hub Picaza (toutes apps) : https://picaza.fr/privacy/ · https://picaza.fr/support/  
+
+> En attendant le DNS `picaza.fr`, le site est aussi sur https://cosmo34.github.io/picaza/ (si GitHub le sert encore avec le CNAME).
 
 ## Prérequis
 
