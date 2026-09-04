@@ -18,15 +18,21 @@
       "bundleIdentifier": "fr.goway.app",
       "buildNumber": "1",
       "entitlements": {
-        "com.apple.security.application-groups": ["group.fr.goway.app"]
+        "com.apple.security.application-groups": [
+          "group.fr.goway.app"
+        ]
       },
       "infoPlist": {
         "NSSupportsLiveActivities": true,
         "NSSupportsLiveActivitiesFrequentUpdates": true,
         "ITSAppUsesNonExemptEncryption": false,
-        "NSLocationWhenInUseUsageDescription": "GOWAY utilise votre position pour calculer le temps de marche jusqu'à l'arrêt et vous guider.",
-        "NSLocationAlwaysAndWhenInUseUsageDescription": "GOWAY utilise votre position pour les notifications de départ et le suivi en temps réel.",
-        "UIBackgroundModes": ["location", "fetch", "remote-notification"],
+        "NSLocationWhenInUseUsageDescription": "GOWAY utilise votre position pour calculer le temps de marche jusqu'\u00e0 l'arr\u00eat et vous guider.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "GOWAY utilise votre position pour les notifications de d\u00e9part et le suivi en temps r\u00e9el.",
+        "UIBackgroundModes": [
+          "location",
+          "fetch",
+          "remote-notification"
+        ],
         "LSApplicationQueriesSchemes": [
           "comgooglemaps",
           "waze",
@@ -38,19 +44,27 @@
         "NSPrivacyAccessedAPITypes": [
           {
             "NSPrivacyAccessedAPIType": "NSPrivacyAccessedAPICategoryUserDefaults",
-            "NSPrivacyAccessedAPITypeReasons": ["CA92.1"]
+            "NSPrivacyAccessedAPITypeReasons": [
+              "CA92.1"
+            ]
           },
           {
             "NSPrivacyAccessedAPIType": "NSPrivacyAccessedAPICategoryFileTimestamp",
-            "NSPrivacyAccessedAPITypeReasons": ["C617.1"]
+            "NSPrivacyAccessedAPITypeReasons": [
+              "C617.1"
+            ]
           },
           {
             "NSPrivacyAccessedAPIType": "NSPrivacyAccessedAPICategorySystemBootTime",
-            "NSPrivacyAccessedAPITypeReasons": ["35F9.1"]
+            "NSPrivacyAccessedAPITypeReasons": [
+              "35F9.1"
+            ]
           },
           {
             "NSPrivacyAccessedAPIType": "NSPrivacyAccessedAPICategoryDiskSpace",
-            "NSPrivacyAccessedAPITypeReasons": ["E174.1"]
+            "NSPrivacyAccessedAPITypeReasons": [
+              "E174.1"
+            ]
           }
         ],
         "NSPrivacyCollectedDataTypes": [
@@ -90,7 +104,7 @@
       [
         "expo-location",
         {
-          "locationAlwaysAndWhenInUsePermission": "GOWAY utilise votre position pour les notifications de départ."
+          "locationAlwaysAndWhenInUsePermission": "GOWAY utilise votre position pour les notifications de d\u00e9part."
         }
       ],
       [
@@ -107,7 +121,8 @@
         "projectId": "REPLACE_AFTER_EAS_INIT"
       },
       "privacyPolicyUrl": "https://picaza.fr/privacy/goway/",
-      "supportUrl": "https://picaza.fr/support/goway/"
+      "supportUrl": "https://picaza.fr/support/goway/",
+      "appStoreId": "6806571587"
     },
     "experiments": {
       "typedRoutes": true
