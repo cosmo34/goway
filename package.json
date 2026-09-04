@@ -1,0 +1,23 @@
+{
+  "name": "goway",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "api": "npm run dev -w @goway/api",
+    "mobile": "npm run start -w @goway/mobile",
+    "mobile:ios": "npm run ios -w @goway/mobile",
+    "mobile:android": "npm run android -w @goway/mobile",
+    "prebuild": "npm run prebuild -w @goway/mobile",
+    "dev": "concurrently \"npm run api\" \"npm run mobile\"",
+    "build": "npm run build -w @goway/api",
+    "typecheck": "npm run typecheck -w @goway/api && npm run typecheck -w @goway/mobile",
+    "otp": "docker compose up otp -d",
+    "download-gtfs": "npm run download-gtfs -w @goway/api"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}

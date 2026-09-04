@@ -1,0 +1,63 @@
+/* GOWAY legal pages */
+:root {
+  --bg: #0a0a0b;
+  --surface: #141416;
+  --text: #f2f2f4;
+  --muted: #9a9aa3;
+  --accent: #5b8def;
+  --border: rgba(255, 255, 255, 0.08);
+  --max: 720px;
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background: radial-gradient(1200px 600px at 20% -10%, #1a2740 0%, var(--bg) 55%);
+  color: var(--text);
+  line-height: 1.6;
+  min-height: 100vh;
+}
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.wrap { max-width: var(--max); margin: 0 auto; padding: 28px 20px 64px; }
+header {
+  display: flex; flex-wrap: wrap; gap: 12px;
+  align-items: center; justify-content: space-between;
+  margin-bottom: 28px; padding-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+}
+.brand { font-weight: 800; letter-spacing: 0.04em; color: var(--accent); font-size: 1.1rem; }
+nav { display: flex; flex-wrap: wrap; gap: 10px 14px; font-size: 0.9rem; }
+.langs {
+  display: flex; flex-wrap: wrap; gap: 8px;
+  margin: 18px 0 28px;
+}
+.langs a {
+  display: inline-block; padding: 6px 10px;
+  border: 1px solid var(--border); border-radius: 999px;
+  color: var(--muted); font-size: 0.85rem;
+}
+.langs a.active, .langs a:hover {
+  color: var(--text); border-color: var(--accent); background: rgba(91,141,239,0.12);
+  text-decoration: none;
+}
+h1 { font-size: 1.8rem; line-height: 1.25; margin: 0 0 8px; }
+.meta { color: var(--muted); font-size: 0.92rem; margin-bottom: 28px; }
+h2 { font-size: 1.15rem; margin: 28px 0 10px; }
+p, li { color: #d7d7de; }
+ul { padding-left: 1.2rem; }
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 18px 18px 8px;
+}
+footer {
+  margin-top: 40px; padding-top: 18px;
+  border-top: 1px solid var(--border);
+  color: var(--muted); font-size: 0.85rem;
+}
+[dir="rtl"] body { text-align: right; }
+[dir="rtl"] ul { padding-right: 1.2rem; padding-left: 0; }

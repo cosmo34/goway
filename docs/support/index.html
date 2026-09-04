@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>GOWAY — Support</title>
+  <script>
+    (function () {
+      var supported = ['fr','en','es','de','it','zh','ar'];
+      var lang = (navigator.language || 'en').slice(0,2).toLowerCase();
+      if (supported.indexOf(lang) === -1) lang = 'en';
+      location.replace(lang + '.html');
+    })();
+  </script>
+  <meta http-equiv="refresh" content="0;url=en.html" />
+  <link rel="canonical" href="en.html" />
+</head>
+<body>
+  <p>Redirecting… <a href="en.html">Support (English)</a></p>
+</body>
+</html>

@@ -1,0 +1,12 @@
+services:
+  otp:
+    image: opentripplanner/opentripplanner:2.5.0
+    container_name: goway-otp
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data/otp:/var/opentripplanner
+    command: --load --serve
+    environment:
+      - JAVA_OPTS=-Xmx2G
+    restart: unless-stopped
