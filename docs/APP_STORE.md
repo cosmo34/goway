@@ -20,7 +20,7 @@ Langues : **fr, en, es, de, it, zh, ar**.
 - [ ] Capabilities : App Groups (`group.fr.goway.app`), Push Notifications, Live Activities
 - [ ] Extension Bundle ID : `fr.goway.app.GowayLiveActivity`
 - [ ] API de production en **HTTPS** (remplacer `EXPO_PUBLIC_API_URL` si besoin dans `eas.json`)
-- [ ] E-mail support réel (actuellement `support@goway.app` dans les pages légales)
+- [ ] E-mail support réel (actuellement `contact@picaza.fr` dans les pages légales)
 
 ## Métadonnées App Store Connect (suggestion)
 
