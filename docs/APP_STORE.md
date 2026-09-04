@@ -22,7 +22,7 @@ Pages hub Picaza (toutes apps) : https://picaza.fr/privacy/ · https://picaza.fr
 - [ ] Capabilities : App Groups (`group.fr.goway.app`), Push Notifications, Live Activities
 - [ ] Extension Bundle ID : `fr.goway.app.GowayLiveActivity`
 - [ ] API de production en **HTTPS** (remplacer `EXPO_PUBLIC_API_URL` si besoin dans `eas.json`)
-- [ ] E-mail support réel (actuellement `contact@picaza.fr` dans les pages légales)
+- [x] E-mail support réel (`contact@picaza.fr` dans les pages légales)
 
 ## Métadonnées App Store Connect (suggestion)
 

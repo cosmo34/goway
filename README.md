@@ -8,11 +8,10 @@ Horaires en temps réel TaM, itinéraires multimodaux, recherche en langage natu
 
 | | URL |
 |---|-----|
-| Politique de confidentialité | https://cosmo34.github.io/goway/privacy/ |
-| Support | https://cosmo34.github.io/goway/support/ |
+| Politique de confidentialité | https://picaza.fr/privacy/goway/ |
+| Support | https://picaza.fr/support/goway/ |
+| Site Picaza | https://picaza.fr/ |
 | Checklist publication | [docs/APP_STORE.md](docs/APP_STORE.md) |
-
-Langues des pages légales : FR, EN, ES, DE, IT, ZH, AR.
 
 ## Démarrage rapide
 
