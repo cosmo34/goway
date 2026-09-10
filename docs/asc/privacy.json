@@ -1,0 +1,9 @@
+{
+  "dataUsages": [
+    {
+      "category": "PRECISE_LOCATION",
+      "purposes": ["APP_FUNCTIONALITY"],
+      "dataProtections": ["DATA_NOT_LINKED_TO_YOU"]
+    }
+  ]
+}

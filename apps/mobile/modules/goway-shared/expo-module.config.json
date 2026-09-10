@@ -1,6 +1,6 @@
 {
   "platforms": ["ios"],
   "ios": {
-    "podspecPath": "GowayShared.podspec"
+    "podspecPath": "ios/GowayShared.podspec"
   }
 }

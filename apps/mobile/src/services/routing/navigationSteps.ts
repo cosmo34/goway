@@ -1,4 +1,5 @@
 import type { Coordinates, Route, RouteLeg, Stop } from '../../stores/transitStore';
+import i18n from '../../i18n';
 
 export type NavigationStepKind = 'walk' | 'transit' | 'arrive';
 
@@ -14,6 +15,10 @@ export interface NavigationStep {
   lineColor?: string;
   durationMinutes: number;
 }
+
+/** Sentinelles API / routage (ne pas traduire pour les comparaisons). */
+export const LEG_ORIGIN_LABEL = 'Départ';
+export const LEG_ARRIVAL_LABEL = 'Arrivée';
 
 function findStop(stops: Stop[], stopId?: string, stopName?: string): Stop | undefined {
   if (stopId) {
@@ -42,7 +47,7 @@ function legPath(
 
   if (leg.mode === 'walk') {
     const end =
-      leg.to === 'Arrivée'
+      leg.to === LEG_ARRIVAL_LABEL
         ? destination
         : findStop(stops, leg.toStopId, leg.to)?.coordinates ?? destination;
     return [cursor, end];
@@ -64,6 +69,7 @@ export function buildNavigationSteps(
 ): NavigationStep[] {
   const steps: NavigationStep[] = [];
   let cursor = origin;
+  const t = i18n.t.bind(i18n);
 
   for (let index = 0; index < route.legs.length; index++) {
     const leg = route.legs[index];
@@ -71,10 +77,10 @@ export function buildNavigationSteps(
     const targetStop = findStop(
       stops,
       leg.toStopId,
-      leg.to === 'Arrivée' ? undefined : leg.to
+      leg.to === LEG_ARRIVAL_LABEL ? undefined : leg.to
     );
     const target =
-      leg.to === 'Arrivée' || isLast
+      leg.to === LEG_ARRIVAL_LABEL || isLast
         ? destination
         : (targetStop?.coordinates ?? destination);
 
@@ -89,8 +95,10 @@ export function buildNavigationSteps(
       steps.push({
         id: `walk-${index}`,
         kind: 'walk',
-        title: isLast ? 'Marchez vers la destination' : `Marchez vers ${leg.to}`,
-        subtitle: `${leg.durationMinutes} min à pied`,
+        title: isLast
+          ? t('navigation.walkToDestination')
+          : t('navigation.walkTo', { place: leg.to }),
+        subtitle: t('navigation.walkDuration', { minutes: leg.durationMinutes }),
         from: pathCoordinates[0] ?? cursor,
         to: target,
         pathCoordinates,
@@ -100,8 +108,13 @@ export function buildNavigationSteps(
       steps.push({
         id: `transit-${index}`,
         kind: 'transit',
-        title: `Prenez ${leg.lineName ?? 'le tram'}`,
-        subtitle: `Direction ${leg.to} · ${leg.durationMinutes} min`,
+        title: t('navigation.takeLine', {
+          line: leg.lineName ?? t('navigation.transitFallback'),
+        }),
+        subtitle: t('navigation.transitDirection', {
+          destination: leg.to,
+          minutes: leg.durationMinutes,
+        }),
         from: pathCoordinates[0] ?? cursor,
         to: target,
         pathCoordinates,
@@ -115,8 +128,8 @@ export function buildNavigationSteps(
   steps.push({
     id: 'arrive',
     kind: 'arrive',
-    title: 'Vous êtes arrivé',
-    subtitle: 'Bon voyage !',
+    title: t('navigation.arrived'),
+    subtitle: t('navigation.bonVoyage'),
     from: destination,
     to: destination,
     pathCoordinates: route.geometry?.length ? route.geometry : [destination],
@@ -134,13 +147,14 @@ export function buildWalkingNavigationSteps(
   durationMinutes: number
 ): NavigationStep[] {
   const routePath = path.length >= 2 ? path : [origin, destination];
+  const t = i18n.t.bind(i18n);
 
   return [
     {
       id: 'walk-0',
       kind: 'walk',
-      title: `Marchez vers ${destinationName}`,
-      subtitle: `${durationMinutes} min à pied`,
+      title: t('navigation.walkTo', { place: destinationName }),
+      subtitle: t('navigation.walkDuration', { minutes: durationMinutes }),
       from: origin,
       to: destination,
       pathCoordinates: routePath,
@@ -149,7 +163,7 @@ export function buildWalkingNavigationSteps(
     {
       id: 'arrive',
       kind: 'arrive',
-      title: 'Vous êtes arrivé',
+      title: t('navigation.arrived'),
       subtitle: destinationName,
       from: destination,
       to: destination,
@@ -174,7 +188,7 @@ export function createWalkOnlyRoute(
     legs: [
       {
         mode: 'walk',
-        from: 'Départ',
+        from: LEG_ORIGIN_LABEL,
         to: destinationName,
         durationMinutes,
         geometry: routePath,

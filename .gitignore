@@ -38,3 +38,8 @@ DerivedData/
 # Logs
 *.log
 npm-debug.*
+
+# Local ASC / Xcode release artifacts
+.asc/
+*.ipa
+*.xcarchive

@@ -19,6 +19,7 @@ import {
   getStopByIdApi,
   getLineDetailApi,
 } from '../api/transitApi';
+import { LEG_ARRIVAL_LABEL } from './navigationSteps';
 
 export interface NaturalLanguageQuery {
   raw: string;
@@ -67,7 +68,7 @@ export class RoutingService {
     origin: Coordinates,
     destination: Coordinates,
     count = 3,
-    _departureTime: Date = new Date(),
+    departureTime: Date = new Date(),
     allowedModes?: TransportMode[]
   ): Promise<Route[]> {
     return planRoutesApi(
@@ -76,7 +77,8 @@ export class RoutingService {
       destination.latitude,
       destination.longitude,
       count,
-      allowedModes
+      allowedModes,
+      departureTime
     );
   }
 
@@ -176,11 +178,20 @@ export function buildRouteCoordinates(
   if (route?.legs.length) {
     for (const leg of route.legs) {
       if (leg.mode === 'walk') {
+        if (leg.geometry && leg.geometry.length >= 2) {
+          for (const point of leg.geometry) points.push(point);
+          continue;
+        }
         const end =
-          leg.to === 'Arrivée'
+          leg.to === LEG_ARRIVAL_LABEL
             ? destination
             : findStop(leg.toStopId, leg.to)?.coordinates;
         if (end) points.push(end);
+        continue;
+      }
+
+      if (leg.geometry && leg.geometry.length >= 2) {
+        for (const point of leg.geometry) points.push(point);
         continue;
       }
 
@@ -299,8 +310,12 @@ export async function buildRoutePathCoordinates(
 
   for (const leg of route.legs) {
     if (leg.mode === 'walk') {
+      if (leg.geometry && leg.geometry.length >= 2) {
+        appendSegment(path, leg.geometry);
+        continue;
+      }
       const end =
-        leg.to === 'Arrivée'
+        leg.to === LEG_ARRIVAL_LABEL
           ? destination
           : findStop(leg.toStopId, leg.to)?.coordinates ?? destination;
       appendSegment(path, [end]);
@@ -436,17 +451,11 @@ export function findBoardingStop(route: Route, stops: Stop[]): Stop | null {
   const transitLeg = route.legs.find((leg) => leg.mode !== 'walk');
   if (!transitLeg) return null;
 
+  // Strict : l’ID de montée du leg — pas de fuzzy name (évite Peyrou pour L1, etc.).
   if (transitLeg.fromStopId) {
     const byId = stops.find((stop) => stop.id === transitLeg.fromStopId);
     if (byId) return byId;
   }
 
-  const normalized = transitLeg.from.toLowerCase();
-  return (
-    stops.find(
-      (stop) =>
-        stop.name.toLowerCase() === normalized ||
-        normalized.includes(stop.name.toLowerCase())
-    ) ?? null
-  );
+  return null;
 }

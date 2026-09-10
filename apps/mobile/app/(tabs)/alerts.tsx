@@ -1,10 +1,11 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { View, Text, StyleSheet, FlatList, RefreshControl } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTranslation } from 'react-i18next';
 import { api } from '../../src/services/api/client';
 import { AppMenuButton } from '../../src/components/AppMenuButton';
-import { colors, spacing, typography, radius } from '../../src/theme';
+import { spacing, typography, radius } from '../../src/theme';
+import { useThemeColors } from '../../src/theme/ThemeContext';
 
 interface Alert {
   id: string;
@@ -14,17 +15,22 @@ interface Alert {
   affectedRouteIds: string[];
 }
 
-const SEVERITY_COLORS = {
-  info: colors.accent,
-  warning: colors.warning,
-  critical: colors.error,
-};
-
 export default function AlertsScreen() {
   const { t } = useTranslation();
   const insets = useSafeAreaInsets();
+  const colors = useThemeColors();
+  const styles = useMemo(() => createStyles(colors), [colors]);
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [refreshing, setRefreshing] = useState(false);
+
+  const severityColors = useMemo(
+    () => ({
+      info: colors.accent,
+      warning: colors.warning,
+      critical: colors.error,
+    }),
+    [colors]
+  );
 
   const loadAlerts = useCallback(async () => {
     try {
@@ -63,12 +69,12 @@ export default function AlertsScreen() {
         contentContainerStyle={{ paddingBottom: insets.bottom + spacing.xl, flexGrow: 1 }}
         ListEmptyComponent={
           <View style={styles.empty}>
-            <Text style={styles.emptyText}>Aucune perturbation signalée</Text>
+            <Text style={styles.emptyText}>{t('alerts.empty')}</Text>
           </View>
         }
         renderItem={({ item }: { item: Alert }) => (
           <View
-            style={[styles.card, { borderLeftColor: SEVERITY_COLORS[item.severity] }]}
+            style={[styles.card, { borderLeftColor: severityColors[item.severity] }]}
             accessibilityRole="alert"
           >
             <Text style={styles.cardTitle}>{item.headerText}</Text>
@@ -77,7 +83,7 @@ export default function AlertsScreen() {
             ) : null}
             {item.affectedRouteIds.length > 0 && (
               <Text style={styles.cardLines}>
-                Lignes : {item.affectedRouteIds.join(', ')}
+                {t('alerts.affectedLines', { lines: item.affectedRouteIds.join(', ') })}
               </Text>
             )}
           </View>
@@ -87,27 +93,29 @@ export default function AlertsScreen() {
   );
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: colors.background },
-  title: {
-    ...typography.titleLarge,
-    color: colors.textPrimary,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.lg,
-  },
-  card: {
-    marginHorizontal: spacing.lg,
-    marginBottom: spacing.md,
-    padding: spacing.lg,
-    backgroundColor: colors.surfaceElevated,
-    borderRadius: radius.lg,
-    borderLeftWidth: 3,
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  cardTitle: { ...typography.titleSmall, color: colors.textPrimary, marginBottom: spacing.xs },
-  cardBody: { ...typography.bodySmall, color: colors.textSecondary },
-  cardLines: { ...typography.labelSmall, color: colors.textTertiary, marginTop: spacing.sm },
-  empty: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.xxl },
-  emptyText: { ...typography.bodyMedium, color: colors.textTertiary },
-});
+function createStyles(colors: ReturnType<typeof useThemeColors>) {
+  return StyleSheet.create({
+    container: { flex: 1, backgroundColor: colors.background },
+    title: {
+      ...typography.titleLarge,
+      color: colors.textPrimary,
+      paddingHorizontal: spacing.lg,
+      paddingVertical: spacing.lg,
+    },
+    card: {
+      marginHorizontal: spacing.lg,
+      marginBottom: spacing.md,
+      padding: spacing.lg,
+      backgroundColor: colors.surfaceElevated,
+      borderRadius: radius.lg,
+      borderLeftWidth: 3,
+      borderWidth: 1,
+      borderColor: colors.border,
+    },
+    cardTitle: { ...typography.titleSmall, color: colors.textPrimary, marginBottom: spacing.xs },
+    cardBody: { ...typography.bodySmall, color: colors.textSecondary },
+    cardLines: { ...typography.labelSmall, color: colors.textTertiary, marginTop: spacing.sm },
+    empty: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.xxl },
+    emptyText: { ...typography.bodyMedium, color: colors.textTertiary },
+  });
+}

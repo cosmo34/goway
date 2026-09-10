@@ -1,4 +1,5 @@
 import { KNOWN_PLACES } from '../config/places';
+import i18n from '../i18n';
 import type { SearchSuggestion, Stop } from '../stores/transitStore';
 
 function suggestionKey(item: SearchSuggestion): string {
@@ -56,7 +57,7 @@ export function searchPlacesLocally(query: string, stops: Stop[]): SearchSuggest
     if (stop.name.toLowerCase().includes(normalized)) {
       add({
         name: stop.name,
-        displayName: `Arrêt · ${stop.name}`,
+        displayName: i18n.t('search.stopResult', { name: stop.name }),
         coordinates: stop.coordinates,
         source: 'stop',
         category: 'stop',

@@ -9,7 +9,7 @@ export function PlanningRouteCard() {
   return (
     <View style={styles.wrapper}>
       <View style={[mapGlassSurfaceStyles.panel, styles.sheet]}>
-        <MapGlassBackground />
+        <MapGlassBackground variant="dark" />
         <View style={styles.content}>
           <ActivityIndicator color={colors.accent} size="small" />
           <Text style={styles.text}>{t('map.planningRoute')}</Text>

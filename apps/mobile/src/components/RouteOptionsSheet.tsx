@@ -41,7 +41,7 @@ export function RouteOptionsSheet({
   return (
     <View style={styles.wrapper}>
       <View style={[mapGlassSurfaceStyles.panel, styles.sheet]}>
-        <MapGlassBackground />
+        <MapGlassBackground variant="dark" />
 
         <View style={styles.header}>
           <View style={styles.headerMain}>
@@ -121,7 +121,7 @@ export function RouteOptionsSheet({
           accessibilityRole="button"
           accessibilityLabel={t('map.startNavigation')}
         >
-          <MapGlassBackground />
+          <MapGlassBackground variant="dark" />
           <Text style={styles.startButtonText}>{t('map.startNavigation')}</Text>
           <Ionicons name="arrow-forward" size={15} color={colors.accent} />
         </Pressable>

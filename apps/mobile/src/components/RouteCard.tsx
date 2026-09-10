@@ -4,12 +4,19 @@ import { useState } from 'react';
 import * as Haptics from 'expo-haptics';
 import { colors, spacing, typography, radius } from '../theme';
 import type { Route } from '../stores/transitStore';
+import { LEG_ARRIVAL_LABEL, LEG_ORIGIN_LABEL } from '../services/routing/navigationSteps';
 import { notificationService } from '../services/notifications/notificationService';
 import { liveActivityService } from '../services/liveActivity/liveActivityService';
 import { useTransitStore } from '../stores/transitStore';
 
 interface RouteCardProps {
   route: Route;
+}
+
+function formatLegEndpoint(name: string, t: (key: string) => string): string {
+  if (name === LEG_ORIGIN_LABEL) return t('common.departure');
+  if (name === LEG_ARRIVAL_LABEL) return t('common.arrival');
+  return name;
 }
 
 export function RouteCard({ route }: RouteCardProps) {
@@ -90,7 +97,7 @@ export function RouteCard({ route }: RouteCardProps) {
                 : `${leg.lineName} — ${leg.durationMinutes} ${t('common.min')}`}
             </Text>
             <Text style={styles.legDetail}>
-              {leg.from} → {leg.to}
+              {formatLegEndpoint(leg.from, t)} → {formatLegEndpoint(leg.to, t)}
             </Text>
           </View>
         </View>

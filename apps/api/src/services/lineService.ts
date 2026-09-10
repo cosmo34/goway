@@ -1,7 +1,8 @@
-import { buildTripLineShapeAsync, getRepresentativeTripIds, officialShapeQuality } from './networkShapeService.js';
+import { buildTripLineShapeAsync, getRepresentativeTripIds, officialShapeQuality, getNetworkLineShapesForMap, ensureNetworkShapesLoaded } from './networkShapeService.js';
 import {
   getGtfs,
-  routeTypeToMode,
+  haversineMeters,
+  routeToMode,
   type GtfsRoute,
   type GtfsStop,
 } from './gtfsLoader.js';
@@ -70,7 +71,7 @@ export function getLineMetaForRoute(routeId: string) {
     shortName: route.route_short_name,
     lineName: `Ligne ${route.route_short_name}`,
     lineColor: routeColor(route),
-    mode: routeTypeToMode(route.route_type),
+    mode: routeToMode(route),
   };
 }
 
@@ -86,7 +87,7 @@ function routeToApi(route: GtfsRoute): ApiLine {
     shortName: route.route_short_name,
     longName: route.route_long_name,
     color: routeColor(route),
-    mode: routeTypeToMode(route.route_type),
+    mode: routeToMode(route),
   };
 }
 
@@ -137,6 +138,94 @@ export function listLines(bbox?: LineBbox): ApiLine[] {
   return lines.sort(compareLines);
 }
 
+export interface ApiLineShape extends ApiLine {
+  /** Identifiant unique du segment (routeId#index) pour la carte. */
+  segmentId: string;
+  coordinates: { latitude: number; longitude: number }[];
+}
+
+const LINE_SHAPE_MIN_STEP_METERS = 45;
+const LINE_SHAPE_MAX_POINTS = 400;
+const lineSegmentsCache = new Map<string, { latitude: number; longitude: number }[][]>();
+
+export function clearLineSegmentsCache(): void {
+  lineSegmentsCache.clear();
+  lineDetailCache.clear();
+}
+
+/** Réduit une polyligne dense tout en gardant début / fin et virages grossiers. */
+function decimateCoordinates(
+  coords: { latitude: number; longitude: number }[],
+  minStepMeters = LINE_SHAPE_MIN_STEP_METERS,
+  maxPoints = LINE_SHAPE_MAX_POINTS
+): { latitude: number; longitude: number }[] {
+  if (coords.length <= 2) return coords;
+
+  const kept: { latitude: number; longitude: number }[] = [coords[0]];
+  let last = coords[0];
+
+  for (let i = 1; i < coords.length - 1; i++) {
+    const point = coords[i];
+    const dist = haversineMeters(last.latitude, last.longitude, point.latitude, point.longitude);
+    if (dist >= minStepMeters) {
+      kept.push(point);
+      last = point;
+    }
+  }
+
+  const end = coords[coords.length - 1];
+  const lastKept = kept[kept.length - 1];
+  if (
+    Math.abs(lastKept.latitude - end.latitude) > 0.00001 ||
+    Math.abs(lastKept.longitude - end.longitude) > 0.00001
+  ) {
+    kept.push(end);
+  }
+
+  if (kept.length <= maxPoints) return kept;
+
+  const step = (kept.length - 1) / (maxPoints - 1);
+  const capped: { latitude: number; longitude: number }[] = [];
+  for (let i = 0; i < maxPoints; i++) {
+    capped.push(kept[Math.round(i * step)]);
+  }
+  return capped;
+}
+
+export async function listLineShapes(bbox?: LineBbox): Promise<ApiLineShape[]> {
+  const reloaded = await ensureNetworkShapesLoaded();
+  if (reloaded) {
+    lineSegmentsCache.clear();
+    lineDetailCache.clear();
+  }
+
+  const gtfs = getGtfs();
+  const shapes: ApiLineShape[] = [];
+
+  for (const route of gtfs.routes.values()) {
+    if (bbox && !routeIntersectsBbox(route.route_id, bbox)) continue;
+
+    let segments = lineSegmentsCache.get(route.route_id);
+    if (!segments) {
+      segments = getNetworkLineShapesForMap(route.route_id)
+        .map((coords) => decimateCoordinates(coords))
+        .filter((coords) => coords.length >= 2);
+      lineSegmentsCache.set(route.route_id, segments);
+    }
+
+    const meta = routeToApi(route);
+    for (let index = 0; index < segments.length; index++) {
+      shapes.push({
+        ...meta,
+        segmentId: `${route.route_id}#${index}`,
+        coordinates: segments[index],
+      });
+    }
+  }
+
+  return shapes.sort(compareLines);
+}
+
 function stopToApi(stop: GtfsStop, mode: ApiLine['mode']): ApiStop {
   return {
     id: stop.stop_id,
@@ -147,6 +236,8 @@ function stopToApi(stop: GtfsStop, mode: ApiLine['mode']): ApiStop {
 }
 
 export async function getLineDetail(routeId: string, directionId?: string): Promise<ApiLineDetail | null> {
+  await ensureNetworkShapesLoaded();
+
   const cacheKey = `${routeId}:${directionId ?? 'all'}`;
   const cached = lineDetailCache.get(cacheKey);
   if (cached) return cached;
@@ -155,7 +246,7 @@ export async function getLineDetail(routeId: string, directionId?: string): Prom
   const route = gtfs.routes.get(routeId);
   if (!route) return null;
 
-  const mode = routeTypeToMode(route.route_type);
+  const mode = routeToMode(route);
   const directions = new Map<string, string>();
 
   for (const trip of gtfs.trips.values()) {

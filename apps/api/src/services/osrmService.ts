@@ -5,9 +5,10 @@ import type { ShapeCoordinate } from './shapeService.js';
 const segmentCache = new Map<string, ShapeCoordinate[]>();
 const walkingRouteCache = new Map<string, WalkingRouteResult>();
 
+/** Routeur foot OSM fiable uniquement — project-osrm.org/foot renvoie souvent des détours absurdes. */
 const WALKING_ROUTERS = [
   CONFIG.walkingRouterUrl,
-  'https://router.project-osrm.org/route/v1/foot',
+  'https://routing.openstreetmap.de/routed-foot/route/v1/foot',
 ];
 
 export interface WalkingRouteResult {
@@ -17,7 +18,154 @@ export interface WalkingRouteResult {
 }
 
 function cacheKey(from: ShapeCoordinate, to: ShapeCoordinate): string {
-  return `${from.latitude.toFixed(5)},${from.longitude.toFixed(5)}->${to.latitude.toFixed(5)},${to.longitude.toFixed(5)}`;
+  // v5 : alternatives OSRM + choix du plus court.
+  return `v5:${from.latitude.toFixed(5)},${from.longitude.toFixed(5)}->${to.latitude.toFixed(5)},${to.longitude.toFixed(5)}`;
+}
+
+function pathLengthMeters(path: ShapeCoordinate[]): number {
+  let total = 0;
+  for (let i = 1; i < path.length; i++) {
+    total += haversineMeters(
+      path[i - 1].latitude,
+      path[i - 1].longitude,
+      path[i].latitude,
+      path[i].longitude
+    );
+  }
+  return total;
+}
+
+/** Distance point → segment (approx. équirectangulaire, OK < 2 km). */
+function pointToSegmentDistanceMeters(
+  point: ShapeCoordinate,
+  start: ShapeCoordinate,
+  end: ShapeCoordinate
+): number {
+  const lat0 = ((start.latitude + end.latitude) / 2) * (Math.PI / 180);
+  const x0 = start.longitude * Math.cos(lat0);
+  const y0 = start.latitude;
+  const x1 = end.longitude * Math.cos(lat0);
+  const y1 = end.latitude;
+  const xp = point.longitude * Math.cos(lat0);
+  const yp = point.latitude;
+  const dx = x1 - x0;
+  const dy = y1 - y0;
+  const len2 = dx * dx + dy * dy;
+  let t = 0;
+  if (len2 > 1e-12) {
+    t = Math.max(0, Math.min(1, ((xp - x0) * dx + (yp - y0) * dy) / len2));
+  }
+  const mx = x0 + t * dx;
+  const my = y0 + t * dy;
+  const metersPerDeg = 111_320;
+  return Math.hypot((xp - mx) * metersPerDeg, (yp - my) * metersPerDeg);
+}
+
+function maxDeviationFromChordMeters(path: ShapeCoordinate[]): number {
+  if (path.length < 3) return 0;
+  const start = path[0];
+  const end = path[path.length - 1];
+  let max = 0;
+  for (let i = 1; i < path.length - 1; i++) {
+    max = Math.max(max, pointToSegmentDistanceMeters(path[i], start, end));
+  }
+  return max;
+}
+
+function dedupeClosePoints(path: ShapeCoordinate[], minGapMeters = 2.5): ShapeCoordinate[] {
+  if (path.length <= 2) return path;
+  const result: ShapeCoordinate[] = [path[0]];
+  for (let i = 1; i < path.length - 1; i++) {
+    const prev = result[result.length - 1];
+    if (
+      haversineMeters(prev.latitude, prev.longitude, path[i].latitude, path[i].longitude) >=
+      minGapMeters
+    ) {
+      result.push(path[i]);
+    }
+  }
+  result.push(path[path.length - 1]);
+  return result;
+}
+
+function snapEndpoints(
+  path: ShapeCoordinate[],
+  from: ShapeCoordinate,
+  to: ShapeCoordinate
+): ShapeCoordinate[] {
+  if (path.length < 2) return [from, to];
+  return [from, ...path.slice(1, -1), to];
+}
+
+/**
+ * Collapse uniquement les sous-segments « place » (quasi-alignés).
+ * Les virages de rue sont conservés.
+ */
+function collapsePlazaSpans(path: ShapeCoordinate[]): ShapeCoordinate[] {
+  if (path.length <= 3) return path;
+
+  const keep = new Array(path.length).fill(true);
+  const minSpan = 8;
+  const maxSpanMeters = 200;
+  const minSpanMeters = 35;
+
+  for (let i = 0; i < path.length - 2; i++) {
+    if (!keep[i]) continue;
+    let bestJ = -1;
+    for (let j = i + minSpan; j < path.length; j++) {
+      const span = path.slice(i, j + 1);
+      const crow = haversineMeters(
+        path[i].latitude,
+        path[i].longitude,
+        path[j].latitude,
+        path[j].longitude
+      );
+      if (crow < minSpanMeters) continue;
+      if (crow > maxSpanMeters) break;
+      const routed = pathLengthMeters(span);
+      const deviation = maxDeviationFromChordMeters(span);
+      if (deviation <= 7 && routed <= crow * 1.2) {
+        bestJ = j;
+      }
+    }
+    if (bestJ > i + 1) {
+      for (let k = i + 1; k < bestJ; k++) keep[k] = false;
+      i = bestJ - 1;
+    }
+  }
+
+  return path.filter((_, index) => keep[index]);
+}
+
+/**
+ * Rues : géométrie OSRM complète (suit la voirie).
+ * Places : corde si le trajet entier (ou un span) est un croisement d’esplanade.
+ */
+function reshapeWalkingPath(
+  path: ShapeCoordinate[],
+  from: ShapeCoordinate,
+  to: ShapeCoordinate
+): ShapeCoordinate[] {
+  if (path.length <= 2) return snapEndpoints(path.length ? path : [from, to], from, to);
+
+  const cleaned = dedupeClosePoints(snapEndpoints(path, from, to), 1.2);
+  const start = cleaned[0];
+  const end = cleaned[cleaned.length - 1];
+  const crow = haversineMeters(start.latitude, start.longitude, end.latitude, end.longitude);
+  const routed = pathLengthMeters(cleaned);
+  const deviation = maxDeviationFromChordMeters(cleaned);
+
+  // Place / esplanade courte : presque une droite → corde.
+  if (
+    crow >= 30 &&
+    crow <= 220 &&
+    deviation <= 8 &&
+    routed <= crow * 1.22
+  ) {
+    return [start, end];
+  }
+
+  return collapsePlazaSpans(cleaned);
 }
 
 function straightLineRoute(from: ShapeCoordinate, to: ShapeCoordinate): WalkingRouteResult {
@@ -39,7 +187,7 @@ async function fetchWalkingRouteFrom(
   from: ShapeCoordinate,
   to: ShapeCoordinate
 ): Promise<WalkingRouteResult | null> {
-  const url = `${routerBaseUrl}/${from.longitude},${from.latitude};${to.longitude},${to.latitude}?overview=full&geometries=geojson`;
+  const url = `${routerBaseUrl}/${from.longitude},${from.latitude};${to.longitude},${to.latitude}?overview=full&geometries=geojson&alternatives=true`;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), CONFIG.walkingRouterTimeoutMs);
   const response = await fetch(url, { signal: controller.signal });
@@ -58,9 +206,15 @@ async function fetchWalkingRouteFrom(
 
   if (data.code !== 'Ok') return null;
 
-  const route = data.routes?.[0];
-  const coordinates = route?.geometry?.coordinates;
-  if (!route || !coordinates?.length) return null;
+  const routes = (data.routes ?? []).filter(
+    (route) => route.geometry?.coordinates && route.geometry.coordinates.length > 0
+  );
+  if (!routes.length) return null;
+
+  // Plus court parmi les alternatives OSRM.
+  routes.sort((a, b) => (a.distance ?? Infinity) - (b.distance ?? Infinity));
+  const route = routes[0];
+  const coordinates = route.geometry!.coordinates!;
 
   return {
     path: coordinates.map(([lon, lat]) => ({
@@ -85,10 +239,10 @@ function isReasonableWalkingRoute(
     to.latitude,
     to.longitude
   );
-  if (straightMeters < 30) return true;
+  if (straightMeters < 25) return true;
 
-  // Le routeur OSRM public renvoie parfois un tracé voiture (détour x3).
-  const maxRatio = straightMeters < 200 ? 2.8 : 2.2;
+  // Centre historique : détours piétons fréquents — ne pas rejeter trop tôt.
+  const maxRatio = straightMeters < 250 ? 4.5 : straightMeters < 800 ? 3.5 : 2.8;
   return result.distanceMeters <= straightMeters * maxRatio;
 }
 
@@ -126,9 +280,10 @@ export async function getWalkingRoute(
   if (cached) return cached;
 
   const fallback = straightLineRoute(from, to);
+  const uniqueRouters = [...new Set(WALKING_ROUTERS.filter(Boolean))];
 
   const attempts = await Promise.all(
-    WALKING_ROUTERS.map(async (routerBaseUrl) => {
+    uniqueRouters.map(async (routerBaseUrl) => {
       try {
         const result = await fetchWalkingRouteFrom(routerBaseUrl, from, to);
         if (!result || !isReasonableWalkingRoute(result, from, to)) return null;
@@ -139,11 +294,29 @@ export async function getWalkingRoute(
     })
   );
 
-  const best = attempts.find((result) => result != null);
+  // Préférer le tracé le plus court parmi les réponses raisonnables (moins de détours foireux).
+  const candidates = attempts.filter((result): result is WalkingRouteResult => result != null);
+  candidates.sort((a, b) => a.distanceMeters - b.distanceMeters);
+  const best = candidates[0];
+
   if (best) {
-    walkingRouteCache.set(key, best);
-    segmentCache.set(`foot:${key}`, best.path);
-    return best;
+    const reshapedPath = reshapeWalkingPath(best.path, from, to);
+    const reshaped: WalkingRouteResult = {
+      ...best,
+      path: reshapedPath,
+      distanceMeters:
+        reshapedPath.length === 2
+          ? haversineMeters(
+              reshapedPath[0].latitude,
+              reshapedPath[0].longitude,
+              reshapedPath[1].latitude,
+              reshapedPath[1].longitude
+            )
+          : Math.min(best.distanceMeters, pathLengthMeters(reshapedPath)),
+    };
+    walkingRouteCache.set(key, reshaped);
+    segmentCache.set(`foot:${key}`, reshaped.path);
+    return reshaped;
   }
 
   walkingRouteCache.set(key, fallback);

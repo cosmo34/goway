@@ -11,6 +11,11 @@ export interface GeocodingResult {
   osmClass: string;
   category: GeocodingCategory;
   importance: number;
+  /** « 12 rue de la Loge » */
+  streetLine?: string;
+  city?: string;
+  /** Quartier / voisinage */
+  quarter?: string;
 }
 
 const NOMINATIM_URL = 'https://nominatim.openstreetmap.org/search';
@@ -116,20 +121,35 @@ export async function geocodePlace(
       importance: number;
       name?: string;
       address?: {
+        house_number?: string;
         road?: string;
-        suburb?: string;
+        pedestrian?: string;
+        footway?: string;
         neighbourhood?: string;
+        suburb?: string;
+        city_district?: string;
+        quarter?: string;
         city?: string;
+        town?: string;
+        village?: string;
+        municipality?: string;
       };
     }>;
 
     return data.map((item) => {
       const category = classifyGeocodingResult(item.class, item.type);
+      const addr = item.address;
+      const road = addr?.road ?? addr?.pedestrian ?? addr?.footway;
+      const streetLine = [addr?.house_number, road].filter(Boolean).join(' ').trim() || undefined;
+      const city = addr?.city ?? addr?.town ?? addr?.village ?? addr?.municipality;
+      const quarter =
+        addr?.neighbourhood ?? addr?.suburb ?? addr?.city_district ?? addr?.quarter;
+
       const name =
         item.name ??
-        item.address?.road ??
-        item.address?.suburb ??
-        item.address?.neighbourhood ??
+        streetLine ??
+        addr?.suburb ??
+        addr?.neighbourhood ??
         item.display_name.split(',')[0];
 
       return {
@@ -141,6 +161,9 @@ export async function geocodePlace(
         osmClass: item.class,
         category,
         importance: item.importance,
+        streetLine,
+        city,
+        quarter,
       };
     });
   } catch {

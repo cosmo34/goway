@@ -31,7 +31,7 @@ export function WalkNavigationCard({ stop, walkingMinutes, onClose }: WalkNaviga
   return (
     <View style={styles.wrapper}>
       <View style={[mapGlassSurfaceStyles.panel, styles.sheet]}>
-        <MapGlassBackground />
+        <MapGlassBackground variant="dark" />
 
         <View style={styles.header}>
           <View style={styles.headerMain}>
@@ -60,7 +60,7 @@ export function WalkNavigationCard({ stop, walkingMinutes, onClose }: WalkNaviga
           accessibilityRole="button"
           accessibilityLabel={t('map.openWalkingDirections')}
         >
-          <MapGlassBackground />
+          <MapGlassBackground variant="dark" />
           <Ionicons name="navigate-outline" size={15} color={colors.accent} />
           <Text style={styles.actionButtonText}>{t('map.openWalkingDirections')}</Text>
         </Pressable>

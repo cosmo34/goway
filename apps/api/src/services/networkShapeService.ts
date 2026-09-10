@@ -1,16 +1,27 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { CONFIG } from '../config.js';
-import { getGtfs, haversineMeters, routeTypeToMode, type GtfsRoute } from './gtfsLoader.js';
+import {
+  getGtfs,
+  haversineMeters,
+  isTripServicePreferred,
+  routeToMode,
+  type GtfsRoute,
+} from './gtfsLoader.js';
 import type { ShapeCoordinate } from './shapeService.js';
 
 const TRAM_LINES_URL =
   'https://data.montpellier3m.fr/sites/default/files/ressources/MMM_MMM_LigneTram.json';
 const BUS_LINES_URL =
   'https://data.montpellier3m.fr/sites/default/files/ressources/MMM_MMM_BusLigne.json';
+const BUSTRAM_LINES_URL =
+  'https://data.montpellier3m.fr/sites/default/files/ressources/MMM_MMM_Bustram.json';
 
 interface NetworkLineFeature {
+  /** Numéro d’exploitation MMM (tram/bus). 0 si ligne lettre (Bustram). */
   lineNumber: number;
+  /** Code lettre Bustram (A–E), si applicable. */
+  lineCode?: string;
   mode: 'tram' | 'bus' | 'tram_bus';
   name: string;
   sens: string;
@@ -30,7 +41,8 @@ interface TripShapeContext {
 const MAX_SNAP_DISTANCE_METERS = 220;
 const MAX_SCORE_SNAP_DISTANCE_METERS = 550;
 const MAX_SHAPE_GAP_METERS = 250;
-const DENSE_SHAPE_GAP_METERS = 450;
+/** Les GeoJSON MMM ont parfois des trous ~500 m (ex. L3 Picasso → Boirargues). */
+const DENSE_SHAPE_GAP_METERS = 600;
 const DENSE_SHAPE_MIN_POINTS = 12;
 const SHAPE_SEARCH_WINDOW = 1200;
 
@@ -105,6 +117,7 @@ export async function loadNetworkShapes(force = false): Promise<void> {
 
   const tramCachePath = path.join(cacheDir, 'tram-lines.json');
   const busCachePath = path.join(cacheDir, 'bus-lines.json');
+  const bustramCachePath = path.join(cacheDir, 'bustram-lines.json');
 
   const loadJson = async (url: string, cachePath: string, label: string): Promise<string> => {
     const cacheFresh =
@@ -125,9 +138,10 @@ export async function loadNetworkShapes(force = false): Promise<void> {
     return raw;
   };
 
-  const [tramRaw, busRaw] = await Promise.all([
+  const [tramRaw, busRaw, bustramRaw] = await Promise.all([
     loadJson(TRAM_LINES_URL, tramCachePath, 'tram'),
     loadJson(BUS_LINES_URL, busCachePath, 'bus'),
+    loadJson(BUSTRAM_LINES_URL, bustramCachePath, 'bustram'),
   ]);
 
   const parseFeatures = (
@@ -164,14 +178,56 @@ export async function loadNetworkShapes(force = false): Promise<void> {
       .filter((feature) => feature.lineNumber > 0 && feature.coordinates.length >= 2);
   };
 
+  const parseBustramFeatures = (raw: string): NetworkLineFeature[] => {
+    const geojson = JSON.parse(raw) as {
+      features?: Array<{
+        properties?: {
+          nom_ligne?: string;
+          sens?: string;
+        };
+        geometry?: {
+          type?: string;
+          coordinates?: [number, number][];
+        };
+      }>;
+    };
+
+    return (geojson.features ?? [])
+      .filter((feature) => feature.geometry?.type === 'LineString')
+      .map((feature) => {
+        const name = feature.properties?.nom_ligne ?? '';
+        const lineCode = lineCodeFromBustramName(name);
+        return {
+          lineNumber: 0,
+          lineCode: lineCode ?? undefined,
+          mode: 'tram_bus' as const,
+          name,
+          sens: feature.properties?.sens ?? '',
+          coordinates: (feature.geometry?.coordinates ?? []).map(([lon, lat]) => ({
+            latitude: lat,
+            longitude: lon,
+          })),
+        };
+      })
+      .filter((feature) => Boolean(feature.lineCode) && feature.coordinates.length >= 2);
+  };
+
   networkFeatures = [
     ...parseFeatures(tramRaw, 'tram'),
     ...parseFeatures(busRaw, 'bus'),
+    ...parseBustramFeatures(bustramRaw),
   ];
 
   tripShapeContextCache.clear();
   tripLineShapeCache.clear();
   console.log(`[NetworkShapes] ${networkFeatures.length} tracés officiels chargés`);
+}
+
+/** Recharge les GeoJSON si le module a été hot-reloadé (networkFeatures remis à null). */
+export async function ensureNetworkShapesLoaded(): Promise<boolean> {
+  if (networkFeatures && networkFeatures.length > 0) return false;
+  await loadNetworkShapes(true);
+  return true;
 }
 
 /** @deprecated Utiliser loadNetworkShapes */
@@ -190,6 +246,22 @@ export function lineNumberFromRoute(route: GtfsRoute): number | null {
   return null;
 }
 
+/** Code lettre Bustram (A–E) depuis le short_name GTFS. */
+export function lineCodeFromRoute(route: GtfsRoute): string | null {
+  const short = route.route_short_name.trim().toUpperCase();
+  if (/^[A-E]$/.test(short)) return short;
+  const fromLong = lineCodeFromBustramName(route.route_long_name ?? '');
+  return fromLong;
+}
+
+function lineCodeFromBustramName(name: string): string | null {
+  const match =
+    name.match(/\bBustram\s+([A-E])\b/i) ??
+    name.match(/\bLigne\s+([A-E])\b/i) ??
+    name.match(/^([A-E])\b/);
+  return match ? match[1].toUpperCase() : null;
+}
+
 export function officialLineNumbersForRoute(route: GtfsRoute): number[] {
   const shortName = route.route_short_name.trim();
   const alias = ROUTE_LINE_ALIASES[shortName];
@@ -197,6 +269,41 @@ export function officialLineNumbersForRoute(route: GtfsRoute): number[] {
 
   const direct = lineNumberFromRoute(route);
   return direct != null ? [direct] : [];
+}
+
+function pathLengthMeters(segment: ShapeCoordinate[]): number {
+  let total = 0;
+  for (let i = 1; i < segment.length; i++) {
+    total += haversineMeters(
+      segment[i - 1].latitude,
+      segment[i - 1].longitude,
+      segment[i].latitude,
+      segment[i].longitude
+    );
+  }
+  return total;
+}
+
+/** Préférer un tronçon officiel (même avec un trou) à une corde arrêt→arrêt. */
+function preferOfficialHop(
+  hop: ShapeCoordinate[],
+  fromPoint: ShapeCoordinate,
+  toPoint: ShapeCoordinate,
+  gapLimit: number
+): boolean {
+  if (hop.length < 2) return false;
+  if (maxSegmentJump(hop) <= gapLimit) return true;
+  if (hop.length < 3) return false;
+
+  const crow = haversineMeters(
+    fromPoint.latitude,
+    fromPoint.longitude,
+    toPoint.latitude,
+    toPoint.longitude
+  );
+  // Suburbain : les corridors MMM peuvent serpentir (ratio plus large sur longues distances).
+  const maxRatio = crow >= 8_000 ? 4.5 : crow >= 3_000 ? 3.5 : 2.5;
+  return pathLengthMeters(hop) <= crow * maxRatio;
 }
 
 function maxAllowedSegmentGap(slice: ShapeCoordinate[]): number {
@@ -300,9 +407,13 @@ function candidatesForRoute(routeId: string): NetworkLineFeature[] {
   if (!route) return [];
 
   const lineNumbers = officialLineNumbersForRoute(route);
-  if (!lineNumbers.length) return [];
+  const lineCode = lineCodeFromRoute(route);
 
-  return networkFeatures.filter((feature) => lineNumbers.includes(feature.lineNumber));
+  return networkFeatures.filter((feature) => {
+    if (lineCode && feature.lineCode === lineCode) return true;
+    if (lineNumbers.length > 0 && lineNumbers.includes(feature.lineNumber)) return true;
+    return false;
+  });
 }
 
 function directionPreferenceScore(tripId: string, candidate: NetworkLineFeature): number {
@@ -406,7 +517,8 @@ function shapeForTrip(tripId: string, routeId: string): ShapeCoordinate[] | null
 
 function minimumMatchedStops(totalStops: number): number {
   if (totalStops < 2) return 0;
-  return Math.max(3, Math.ceil(totalStops * 0.6));
+  // Suburbain : arrêts parfois éloignés du corridor digitalisé → seuil un peu plus bas.
+  return Math.max(2, Math.ceil(totalStops * 0.45));
 }
 
 function buildOfficialTripShape(tripId: string, routeId: string): ShapeCoordinate[] | null {
@@ -442,8 +554,10 @@ function buildOfficialTripShape(tripId: string, routeId: string): ShapeCoordinat
   if (firstIdx < 0 || lastIdx <= firstIdx) return null;
 
   const slice = context.shape.slice(firstIdx, lastIdx + 1);
-  const gapLimit = Math.max(maxAllowedSegmentGap(slice), maxAllowedSegmentGap(context.shape));
-  return maxSegmentJump(slice) <= gapLimit ? slice : null;
+  if (slice.length < 2) return null;
+
+  // Ne pas jeter tout le tracé MMM pour un trou local (ex. L3 Picasso–Boirargues).
+  return slice;
 }
 
 function sliceShapeBetweenPoints(
@@ -465,8 +579,11 @@ function sliceShapeBetweenPoints(
   if (fromIdx < 0 || toIdx < 0 || toIdx <= fromIdx) return null;
 
   const slice = shape.slice(fromIdx, toIdx + 1);
+  if (slice.length < 2) return null;
+
   const gapLimit = Math.max(maxAllowedSegmentGap(slice), maxAllowedSegmentGap(shape));
-  return maxSegmentJump(slice) <= gapLimit ? slice : null;
+  if (preferOfficialHop(slice, fromPoint, toPoint, gapLimit)) return slice;
+  return null;
 }
 
 function sliceOfficialTripShapeSegment(
@@ -624,11 +741,11 @@ function buildShapeAlongStopIds(
 
     const hop = shape.slice(fromIdx, toIdx + 1);
     const gapLimit = Math.max(maxAllowedSegmentGap(hop), maxAllowedSegmentGap(shape));
-    if (maxSegmentJump(hop) > gapLimit) {
+    if (preferOfficialHop(hop, pointA, pointB, gapLimit)) {
+      appendShapePoints(segment, hop);
+    } else {
       if (!segment.length) segment.push(pointA);
       segment.push(pointB);
-    } else {
-      appendShapePoints(segment, hop);
     }
 
     searchFrom = toIdx;
@@ -673,7 +790,7 @@ export async function buildTripLineShapeAsync(
   const stopIds = tripStops.map((stopTime) => stopTime.stop_id);
   const stopPoints = stopPointsFromIds(stopIds);
   const route = getGtfs().routes.get(routeId);
-  const mode = routeTypeToMode(route?.route_type ?? '3');
+  const mode = route ? routeToMode(route) : 'bus';
 
   const officialShape = buildOfficialTripShape(tripId, routeId);
   if (officialShape && officialShape.length >= 2) {
@@ -687,7 +804,7 @@ export async function buildTripLineShapeAsync(
     return syncShape;
   }
 
-  if (mode === 'bus') {
+  if (mode === 'bus' || mode === 'tram_bus') {
     const { getTransitRoadPath } = await import('./osrmService.js');
     const roadShape = await getTransitRoadPath(stopPoints);
     cacheTripLineShape(tripId, routeId, roadShape);
@@ -715,16 +832,36 @@ export function officialShapeQuality(tripId: string, routeId: string): number {
 
 export function getRepresentativeTripIds(routeId: string, directionId?: string): string[] {
   const gtfs = getGtfs();
-  const bestByDirection = new Map<string, { tripId: string; stopCount: number }>();
+  const bestByDirection = new Map<string, { tripId: string; score: number }>();
 
   for (const trip of gtfs.trips.values()) {
     if (trip.route_id !== routeId) continue;
     if (directionId != null && trip.direction_id !== directionId) continue;
+    if (!isTripServicePreferred(trip.trip_id)) continue;
 
     const stopCount = gtfs.stopTimesByTrip.get(trip.trip_id)?.length ?? 0;
+    // Motif préféré déjà filtré : parmi ceux-là, un trip avec un corridor dense.
+    const score = stopCount;
     const current = bestByDirection.get(trip.direction_id);
-    if (!current || stopCount > current.stopCount) {
-      bestByDirection.set(trip.direction_id, { tripId: trip.trip_id, stopCount });
+    if (!current || score > current.score) {
+      bestByDirection.set(trip.direction_id, { tripId: trip.trip_id, score });
+    }
+  }
+
+  if (bestByDirection.size) {
+    return [...bestByDirection.values()].map((entry) => entry.tripId);
+  }
+
+  // Fallback : un trip du motif préféré même hors calendrier du jour.
+  for (const trip of gtfs.trips.values()) {
+    if (trip.route_id !== routeId) continue;
+    if (directionId != null && trip.direction_id !== directionId) continue;
+    const preferred = gtfs.preferredPatternByRouteDir.get(`${trip.route_id}:${trip.direction_id}`);
+    if (preferred && gtfs.tripPatternByTrip.get(trip.trip_id) !== preferred) continue;
+    const stopCount = gtfs.stopTimesByTrip.get(trip.trip_id)?.length ?? 0;
+    const current = bestByDirection.get(trip.direction_id);
+    if (!current || stopCount > current.score) {
+      bestByDirection.set(trip.direction_id, { tripId: trip.trip_id, score: stopCount });
     }
   }
 
@@ -732,22 +869,7 @@ export function getRepresentativeTripIds(routeId: string, directionId?: string):
 }
 
 function findBestTripId(routeId: string, directionId?: string): string | null {
-  const gtfs = getGtfs();
-  let bestTripId: string | null = null;
-  let bestStopCount = 0;
-
-  for (const trip of gtfs.trips.values()) {
-    if (trip.route_id !== routeId) continue;
-    if (directionId != null && trip.direction_id !== directionId) continue;
-
-    const times = gtfs.stopTimesByTrip.get(trip.trip_id) ?? [];
-    if (times.length > bestStopCount) {
-      bestStopCount = times.length;
-      bestTripId = trip.trip_id;
-    }
-  }
-
-  return bestTripId;
+  return getRepresentativeTripIds(routeId, directionId)[0] ?? null;
 }
 
 export function getNetworkShapeSegment(
@@ -767,8 +889,14 @@ export function getNetworkShapeSegment(
   const stopPointCount = toIdx - fromIdx + 1;
 
   const sliced = sliceOfficialTripShapeSegment(tripId, fromStopId, toStopId);
-  if (sliced && sliced.length >= 2 && !shapeNeedsRoadRouting(sliced, stopPointCount)) {
-    return sliced;
+  if (sliced && sliced.length >= 2) {
+    if (!shapeNeedsRoadRouting(sliced, stopPointCount)) {
+      return sliced;
+    }
+    // Corridor MMM densifié : le garder même avec un trou local (évite les cordes suburbaines).
+    if (sliced.length >= Math.max(6, stopPointCount + 2)) {
+      return sliced;
+    }
   }
 
   const from = gtfs.stops.get(fromStopId);
@@ -805,6 +933,56 @@ export function getNetworkLineShape(routeId: string, directionId?: string): Shap
     candidate.coordinates.length > best.coordinates.length ? candidate : best
   );
   return longest.coordinates;
+}
+
+/** Aller/retour MMM : extrémités proches à quelques dizaines de mètres près. */
+const MAP_CORRIDOR_ENDPOINT_TOLERANCE_M = 120;
+
+function sameCorridorEndpoints(a: ShapeCoordinate[], b: ShapeCoordinate[]): boolean {
+  const a0 = a[0];
+  const a1 = a[a.length - 1];
+  const b0 = b[0];
+  const b1 = b[b.length - 1];
+  const sameOrientation =
+    haversineMeters(a0.latitude, a0.longitude, b0.latitude, b0.longitude) <=
+      MAP_CORRIDOR_ENDPOINT_TOLERANCE_M &&
+    haversineMeters(a1.latitude, a1.longitude, b1.latitude, b1.longitude) <=
+      MAP_CORRIDOR_ENDPOINT_TOLERANCE_M;
+  const reversed =
+    haversineMeters(a0.latitude, a0.longitude, b1.latitude, b1.longitude) <=
+      MAP_CORRIDOR_ENDPOINT_TOLERANCE_M &&
+    haversineMeters(a1.latitude, a1.longitude, b0.latitude, b0.longitude) <=
+      MAP_CORRIDOR_ENDPOINT_TOLERANCE_M;
+  return sameOrientation || reversed;
+}
+
+/**
+ * Tracés carte : toutes les branches officielles distinctes (ex. L3 Lattes + Pérols),
+ * sans les aller/retour en double.
+ */
+export function getNetworkLineShapesForMap(routeId: string): ShapeCoordinate[][] {
+  const candidates = candidatesForRoute(routeId);
+  if (candidates.length > 0) {
+    const corridors: ShapeCoordinate[][] = [];
+    for (const candidate of candidates) {
+      if (candidate.coordinates.length < 2) continue;
+      const coords = candidate.coordinates;
+      const matchIndex = corridors.findIndex((existing) =>
+        sameCorridorEndpoints(existing, coords)
+      );
+      if (matchIndex < 0) {
+        corridors.push(coords);
+        continue;
+      }
+      if (coords.length > corridors[matchIndex].length) {
+        corridors[matchIndex] = coords;
+      }
+    }
+    if (corridors.length > 0) return corridors;
+  }
+
+  const single = getNetworkLineShape(routeId);
+  return single.length >= 2 ? [single] : [];
 }
 
 /** @deprecated Utiliser getNetworkShapeSegment */

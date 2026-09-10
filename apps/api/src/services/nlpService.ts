@@ -92,21 +92,29 @@ async function resolvePlace(
       }
     }
 
-    const stops = searchStops(searchTerm, 3);
+    const stops = searchStops(searchTerm, 5);
     if (stops.length > 0) {
-      const best =
+      const ranked =
         userLat != null && userLon != null
           ? [...stops].sort(
               (a, b) =>
                 haversineMeters(userLat, userLon, a.coordinates.latitude, a.coordinates.longitude) -
                 haversineMeters(userLat, userLon, b.coordinates.latitude, b.coordinates.longitude)
-            )[0]
-          : stops[0];
+            )
+          : stops;
+      const best = ranked[0];
+      const suggestions = ranked.map((stop) => ({
+        name: stop.name,
+        displayName: stop.name,
+        coordinates: stop.coordinates,
+        source: 'stop' as const,
+      }));
 
       return {
         destination: best.name,
         destinationCoordinates: best.coordinates,
         destinationStopId: best.id,
+        suggestions,
       };
     }
   }
@@ -115,15 +123,22 @@ async function resolvePlace(
     scope,
     userLat,
     userLon,
-    limit: 5,
+    limit: 8,
   });
 
   const ranked = rankGeocodingResults(geocoded, userLat, userLon);
   if (ranked.length > 0) {
     const best = ranked[0];
+    const suggestions = ranked.map((place) => ({
+      name: place.name,
+      displayName: place.displayName,
+      coordinates: { latitude: place.latitude, longitude: place.longitude },
+      source: 'geocode' as const,
+    }));
     return {
       destination: best.name,
       destinationCoordinates: { latitude: best.latitude, longitude: best.longitude },
+      suggestions,
     };
   }
 

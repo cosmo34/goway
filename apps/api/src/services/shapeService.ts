@@ -1,4 +1,4 @@
-import { getGtfs, haversineMeters } from './gtfsLoader.js';
+import { getGtfs, getStationStopIds, haversineMeters } from './gtfsLoader.js';
 import type { ApiRoute, ApiRouteLeg } from './routingService.js';
 import { getWalkingSegment, getTransitRoadPath } from './osrmService.js';
 import {
@@ -9,6 +9,37 @@ import {
 export interface ShapeCoordinate {
   latitude: number;
   longitude: number;
+}
+
+/** Map a transfer quay to the stop actually served by this trip (same station). */
+function resolveStopIdOnTrip(
+  tripId: string,
+  stopId: string,
+  prefer: 'first' | 'last' = 'first'
+): string {
+  const tripStops = getGtfs().stopTimesByTrip.get(tripId) ?? [];
+  if (tripStops.some((stopTime) => stopTime.stop_id === stopId)) return stopId;
+
+  const stationStops = new Set(getStationStopIds(stopId));
+  const matches = tripStops.filter((stopTime) => stationStops.has(stopTime.stop_id));
+  if (!matches.length) return stopId;
+  return prefer === 'last' ? matches[matches.length - 1].stop_id : matches[0].stop_id;
+}
+
+function resolveTripEndpoints(
+  tripId: string,
+  fromStopId: string,
+  toStopId: string
+): { fromStopId: string; toStopId: string } {
+  const from = resolveStopIdOnTrip(tripId, fromStopId, 'first');
+  const to = resolveStopIdOnTrip(tripId, toStopId, 'last');
+  const tripStops = getGtfs().stopTimesByTrip.get(tripId) ?? [];
+  const fromIdx = tripStops.findIndex((stopTime) => stopTime.stop_id === from);
+  const toIdx = tripStops.findIndex((stopTime) => stopTime.stop_id === to);
+  if (fromIdx >= 0 && toIdx > fromIdx) {
+    return { fromStopId: from, toStopId: to };
+  }
+  return { fromStopId, toStopId };
 }
 
 function stopCoordinates(stopId: string): ShapeCoordinate | null {
@@ -103,6 +134,10 @@ export function getTripShapeSegment(
   mode = 'tram',
   routeId?: string
 ): ShapeCoordinate[] {
+  const resolved = resolveTripEndpoints(tripId, fromStopId, toStopId);
+  fromStopId = resolved.fromStopId;
+  toStopId = resolved.toStopId;
+
   const gtfs = getGtfs();
   const trip = gtfs.trips.get(tripId);
   const resolvedRouteId = trip?.route_id ?? routeId;
@@ -238,6 +273,11 @@ async function roadRoutedTripSegment(
     return fallback;
   }
 
+  // Prefer a denser official/GTFS corridor (matches the map line) over OSRM roads.
+  if (fallback.length >= Math.max(8, stopPoints.length * 2)) {
+    return fallback;
+  }
+
   return getTransitRoadPath(stopPoints);
 }
 
@@ -248,32 +288,40 @@ export async function getTripShapeSegmentAsync(
   mode: string,
   routeId?: string
 ): Promise<ShapeCoordinate[]> {
+  const resolved = resolveTripEndpoints(tripId, fromStopId, toStopId);
+  fromStopId = resolved.fromStopId;
+  toStopId = resolved.toStopId;
+
   const gtfs = getGtfs();
   const trip = gtfs.trips.get(tripId);
   const resolvedRouteId = trip?.route_id ?? routeId;
 
+  let officialSegment: ShapeCoordinate[] | null = null;
   if (isOfficialShapeMode(mode) && resolvedRouteId) {
-    const officialSegment = getNetworkShapeSegment(tripId, resolvedRouteId, fromStopId, toStopId);
+    officialSegment = getNetworkShapeSegment(tripId, resolvedRouteId, fromStopId, toStopId);
     if (officialSegment && isUsableOfficialSegment(officialSegment, tripId, fromStopId, toStopId)) {
       return officialSegment;
     }
   }
 
   const tripSegment = getTripStopPoints(tripId, fromStopId, toStopId);
-
-  const shapeId = trip?.shape_id;
-  const shapePoints = shapeId ? gtfs.shapes.get(shapeId) : undefined;
-  if (shapePoints?.length) return tripSegment;
+  // Prefer a denser official corridor (even with gaps) over sparse GTFS/stop chords.
+  const candidate =
+    officialSegment && officialSegment.length > tripSegment.length
+      ? officialSegment
+      : tripSegment;
 
   if (isUndergroundTrip(tripId)) {
-    return tripSegment;
+    return candidate;
   }
 
+  // Densify sparse suburban/bus segments via OSRM when GTFS shapes exist but are
+  // only stop-to-stop chords (previously skipped OSRM as soon as shape_id was set).
   if (isSurfaceTransitMode(mode)) {
-    return roadRoutedTripSegment(tripId, fromStopId, toStopId, mode, tripSegment);
+    return roadRoutedTripSegment(tripId, fromStopId, toStopId, mode, candidate);
   }
 
-  return tripSegment;
+  return candidate;
 }
 
 export function buildLegGeometry(
@@ -397,16 +445,14 @@ export async function attachRouteGeometriesAsync(
   destLon: number
 ): Promise<ApiRoute> {
   const destination = { latitude: destLat, longitude: destLon };
-  const origin = { latitude: originLat, longitude: originLon };
+  let cursor = { latitude: originLat, longitude: originLon };
 
-  const geometries = await Promise.all(
-    route.legs.map((leg) => buildLegGeometryAsync(leg, origin, destination))
-  );
-
-  const legs = route.legs.map((leg, index) => ({
-    ...leg,
-    geometry: geometries[index],
-  }));
+  const legs: ApiRouteLeg[] = [];
+  for (const leg of route.legs) {
+    const geometry = await buildLegGeometryAsync(leg, cursor, destination);
+    if (geometry.length) cursor = geometry[geometry.length - 1];
+    legs.push({ ...leg, geometry });
+  }
 
   return {
     ...route,

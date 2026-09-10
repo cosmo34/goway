@@ -2,6 +2,6 @@
   "platforms": ["ios"],
   "ios": {
     "modules": ["GowayNativeModule"],
-    "podspecPath": "GowayNative.podspec"
+    "podspecPath": "ios/GowayNative.podspec"
   }
 }

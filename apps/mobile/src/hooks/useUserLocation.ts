@@ -46,8 +46,8 @@ export function useUserLocation(watch = true, highAccuracy = false) {
     Location.watchPositionAsync(
       {
         accuracy: highAccuracy ? Location.Accuracy.BestForNavigation : Location.Accuracy.Balanced,
-        distanceInterval: highAccuracy ? 10 : 25,
-        timeInterval: highAccuracy ? 3_000 : 10_000,
+        distanceInterval: highAccuracy ? 5 : 25,
+        timeInterval: highAccuracy ? 1_500 : 10_000,
       },
       (pos) => {
         applyPosition({

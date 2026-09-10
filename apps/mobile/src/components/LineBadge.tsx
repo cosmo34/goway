@@ -1,8 +1,9 @@
 import { View, Text, StyleSheet } from 'react-native';
-import { colors, radius } from '../theme';
+import { radius } from '../theme';
+import { useThemeColors } from '../theme/ThemeContext';
 
-export function lineBadgeColors(lineColor?: string) {
-  const color = lineColor ?? colors.accent;
+export function lineBadgeColors(lineColor?: string, accentFallback?: string) {
+  const color = lineColor ?? accentFallback ?? '#2DD4BF';
   return {
     backgroundColor: `${color}48`,
     borderColor: `${color}88`,
@@ -26,6 +27,7 @@ interface LineBadgeProps {
 export const STATION_LARGE_SCALE = 0.85;
 
 export function LineBadge({ label, lineColor, size = 'default' }: LineBadgeProps) {
+  const colors = useThemeColors();
   const large = size === 'large';
   const station = size === 'station';
 
@@ -35,7 +37,7 @@ export function LineBadge({ label, lineColor, size = 'default' }: LineBadgeProps
         styles.badge,
         large && styles.badgeLarge,
         station && styles.badgeStation,
-        lineBadgeColors(lineColor),
+        lineBadgeColors(lineColor, colors.accent),
       ]}
     >
       <View
@@ -47,7 +49,12 @@ export function LineBadge({ label, lineColor, size = 'default' }: LineBadgeProps
         ]}
       />
       <Text
-        style={[styles.text, large && styles.textLarge, station && styles.textStation]}
+        style={[
+          styles.text,
+          { color: colors.textPrimary },
+          large && styles.textLarge,
+          station && styles.textStation,
+        ]}
         numberOfLines={1}
       >
         {label}
@@ -96,9 +103,8 @@ const styles = StyleSheet.create({
   text: {
     fontSize: 11,
     fontWeight: '800',
-    color: colors.textPrimary,
     maxWidth: 40,
-    textShadowColor: 'rgba(0, 0, 0, 0.35)',
+    textShadowColor: 'rgba(0, 0, 0, 0.25)',
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 2,
   },

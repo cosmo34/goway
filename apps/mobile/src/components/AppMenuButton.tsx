@@ -12,8 +12,13 @@ import { BlurView } from 'expo-blur';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter, usePathname } from 'expo-router';
 import { useTranslation } from 'react-i18next';
-import { colors, radius, spacing, typography } from '../theme';
+import { spacing, typography } from '../theme';
+import { useTheme, useThemeColors } from '../theme/ThemeContext';
 import { MapControlButton } from './MapControlButton';
+import { MAP_CHROME_BORDER, MAP_CHROME_TINT, mapChromeText } from './MapGlassSurface';
+
+const TRIGGER_SIZE = 44;
+const TRIGGER_RADIUS = TRIGGER_SIZE / 2;
 
 interface AppMenuButtonProps {
   top: number;
@@ -41,6 +46,9 @@ export function AppMenuButton({
   layersActive,
 }: AppMenuButtonProps) {
   const { t } = useTranslation();
+  const { isDark } = useTheme();
+  const colors = useThemeColors();
+  const styles = useMemo(() => createStyles(colors, isDark), [colors, isDark]);
   const router = useRouter();
   const pathname = usePathname();
   const [open, setOpen] = useState(false);
@@ -131,20 +139,27 @@ export function AppMenuButton({
             accessibilityLabel="Calques"
           />
         ) : null}
-        <Pressable
-          onPress={() => setOpen((v) => !v)}
-          style={styles.trigger}
-          accessibilityRole="button"
-          accessibilityLabel={t('menu.open')}
-        >
+        <View style={styles.trigger}>
           {Platform.OS === 'ios' ? (
-            <View style={StyleSheet.absoluteFill}>
+            <View style={styles.triggerBlur}>
               <BlurView intensity={32} tint="dark" />
             </View>
           ) : null}
           <View style={styles.triggerTint} />
-          <Ionicons name={open ? 'close' : 'menu'} size={22} color={colors.textPrimary} />
-        </Pressable>
+          <Pressable
+            onPress={() => setOpen((v) => !v)}
+            style={styles.triggerHit}
+            accessibilityRole="button"
+            accessibilityLabel={t('menu.open')}
+            android_ripple={{
+              color: 'rgba(255,255,255,0.12)',
+              borderless: true,
+              radius: TRIGGER_RADIUS,
+            }}
+          >
+            <Ionicons name={open ? 'close' : 'menu'} size={22} color={mapChromeText.primary} />
+          </Pressable>
+        </View>
       </View>
 
       <Modal visible={open} transparent animationType="none" onRequestClose={close}>
@@ -180,53 +195,69 @@ export function AppMenuButton({
   );
 }
 
-const styles = StyleSheet.create({
-  headerRow: {
-    position: 'absolute',
-    right: spacing.lg,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-    zIndex: 30,
-    elevation: 30,
-  },
-  trigger: {
-    width: 44,
-    height: 44,
-    borderRadius: radius.full,
-    overflow: 'hidden',
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.12)',
-  },
-  triggerTint: {
-    ...StyleSheet.absoluteFill,
-    backgroundColor: 'rgba(14, 14, 16, 0.5)',
-  },
-  backdrop: {
-    flex: 1,
-    backgroundColor: 'transparent',
-  },
-  menuList: {
-    position: 'absolute',
-    right: spacing.lg,
-    alignItems: 'flex-end',
-    gap: 2,
-  },
-  menuItem: {
-    paddingVertical: spacing.sm,
-    paddingHorizontal: spacing.xs,
-  },
-  menuItemPressed: {
-    opacity: 0.65,
-  },
-  menuLabel: {
-    ...typography.titleMedium,
-    color: colors.textPrimary,
-    textAlign: 'right',
-  },
-  menuLabelActive: {
-    color: colors.accent,
-  },
-});
+function createStyles(colors: ReturnType<typeof useThemeColors>, isDark: boolean) {
+  return StyleSheet.create({
+    headerRow: {
+      position: 'absolute',
+      right: spacing.lg,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+      zIndex: 30,
+      elevation: 30,
+    },
+    trigger: {
+      width: TRIGGER_SIZE,
+      height: TRIGGER_SIZE,
+      borderRadius: TRIGGER_RADIUS,
+      overflow: 'hidden',
+      borderWidth: 1,
+      borderColor: MAP_CHROME_BORDER,
+    },
+    triggerBlur: {
+      ...StyleSheet.absoluteFill,
+      borderRadius: TRIGGER_RADIUS,
+      overflow: 'hidden',
+    },
+    triggerTint: {
+      ...StyleSheet.absoluteFill,
+      borderRadius: TRIGGER_RADIUS,
+      backgroundColor: MAP_CHROME_TINT,
+    },
+    triggerHit: {
+      ...StyleSheet.absoluteFill,
+      alignItems: 'center',
+      justifyContent: 'center',
+      zIndex: 1,
+    },
+    backdrop: {
+      flex: 1,
+      backgroundColor: 'transparent',
+    },
+    menuList: {
+      position: 'absolute',
+      right: spacing.lg,
+      alignItems: 'flex-end',
+      gap: 2,
+    },
+    menuItem: {
+      paddingVertical: spacing.sm,
+      paddingHorizontal: spacing.xs,
+    },
+    menuItemPressed: {
+      opacity: 0.65,
+    },
+    menuLabel: {
+      ...typography.titleMedium,
+      color: isDark ? colors.textPrimary : '#000000',
+      textAlign: 'right',
+      fontWeight: '700',
+      textShadowColor: isDark ? 'transparent' : 'rgba(255, 255, 255, 0.85)',
+      textShadowOffset: { width: 0, height: 0 },
+      textShadowRadius: isDark ? 0 : 4,
+    },
+    menuLabelActive: {
+      color: colors.accent,
+    },
+  });
+}

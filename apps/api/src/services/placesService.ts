@@ -19,6 +19,9 @@ export interface PlaceSuggestion {
   coordinates: { latitude: number; longitude: number };
   source: 'known' | 'stop' | 'geocode';
   category: PlaceCategory;
+  streetLine?: string;
+  city?: string;
+  quarter?: string;
 }
 
 interface ScoredPlaceSuggestion extends PlaceSuggestion {
@@ -99,6 +102,9 @@ export async function searchPlaces(
       coordinates: { latitude: place.latitude, longitude: place.longitude },
       source: 'geocode',
       category: place.category,
+      streetLine: place.streetLine,
+      city: place.city,
+      quarter: place.quarter,
       score: 55 + place.importance * 10,
     });
   }

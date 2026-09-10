@@ -11,23 +11,34 @@ export interface AccessibilitySettings {
   hapticFeedback: boolean;
 }
 
+export type ThemePreference = 'light' | 'dark' | 'system';
+
 interface AppState {
   locale: SupportedLocale;
+  themePreference: ThemePreference;
   accessibility: AccessibilitySettings;
   enabledTransportModes: TransportMode[];
   preferencesHydrated: boolean;
   setLocale: (locale: SupportedLocale) => void;
+  setThemePreference: (themePreference: ThemePreference) => void;
   updateAccessibility: (settings: Partial<AccessibilitySettings>) => void;
   toggleTransportMode: (mode: TransportMode) => void;
   hydrateFromStorage: () => Promise<void>;
 }
 
-function persistState(state: Pick<AppState, 'locale' | 'accessibility' | 'enabledTransportModes'>) {
+function persistState(
+  state: Pick<AppState, 'locale' | 'themePreference' | 'accessibility' | 'enabledTransportModes'>
+) {
   void saveAppPreferences({
     locale: state.locale,
+    themePreference: state.themePreference,
     accessibility: state.accessibility,
     enabledTransportModes: state.enabledTransportModes,
   });
+}
+
+function isThemePreference(value: unknown): value is ThemePreference {
+  return value === 'light' || value === 'dark' || value === 'system';
 }
 
 function isTransportMode(value: unknown): value is TransportMode {
@@ -36,6 +47,7 @@ function isTransportMode(value: unknown): value is TransportMode {
 
 export const useAppStore = create<AppState>((set, get) => ({
   locale: 'fr',
+  themePreference: 'system',
   accessibility: {
     largeText: false,
     highContrast: false,
@@ -48,6 +60,11 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   setLocale: (locale) => {
     set({ locale });
+    persistState(get());
+  },
+
+  setThemePreference: (themePreference) => {
+    set({ themePreference });
     persistState(get());
   },
 
@@ -81,6 +98,9 @@ export const useAppStore = create<AppState>((set, get) => ({
 
     set({
       locale: prefs.locale ?? get().locale,
+      themePreference: isThemePreference(prefs.themePreference)
+        ? prefs.themePreference
+        : get().themePreference,
       accessibility: prefs.accessibility
         ? { ...get().accessibility, ...prefs.accessibility }
         : get().accessibility,

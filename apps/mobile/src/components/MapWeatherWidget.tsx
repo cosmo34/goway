@@ -1,8 +1,15 @@
 import { View, Text, StyleSheet, Platform, ActivityIndicator } from 'react-native';
 import { BlurView } from 'expo-blur';
 import { Ionicons } from '@expo/vector-icons';
-import { colors, radius, spacing, typography } from '../theme';
+import { spacing, typography } from '../theme';
 import { weatherIconName, weatherLabel, type MapWeather } from '../services/weather/weatherService';
+import { MAP_CHROME_BORDER, MAP_CHROME_TINT, mapChromeText } from './MapGlassSurface';
+
+const SIZE = Math.round(56 * 1.1); // +10 % vs. ancienne taille (56)
+const RADIUS = SIZE / 2;
+
+/** Exposé pour positionner les contrôles voisins (toggle Carte/Chat). */
+export const MAP_WEATHER_WIDGET_SIZE = SIZE;
 
 interface MapWeatherWidgetProps {
   top: number;
@@ -26,18 +33,18 @@ export function MapWeatherWidget({ top, left, weather, loading }: MapWeatherWidg
       }
     >
       {Platform.OS === 'ios' ? (
-        <View style={StyleSheet.absoluteFill}>
-          <BlurView intensity={28} tint="dark" />
+        <View style={styles.blurWrap}>
+          <BlurView intensity={32} tint="dark" />
         </View>
       ) : null}
       <View style={styles.tint} />
 
       <View style={styles.content}>
         {loading && !weather ? (
-          <ActivityIndicator size="small" color={colors.accent} />
+          <ActivityIndicator size="small" color={mapChromeText.accent} />
         ) : (
           <>
-            <Ionicons name={icon} size={18} color={colors.accent} />
+            <Ionicons name={icon} size={18} color={mapChromeText.accent} />
             <Text style={styles.temperature}>
               {weather != null ? `${weather.temperature}°` : '—'}
             </Text>
@@ -54,18 +61,24 @@ export function MapWeatherWidget({ top, left, weather, loading }: MapWeatherWidg
 const styles = StyleSheet.create({
   wrapper: {
     position: 'absolute',
-    width: 56,
-    height: 56,
-    borderRadius: radius.sm,
+    width: SIZE,
+    height: SIZE,
+    borderRadius: RADIUS,
     overflow: 'hidden',
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: MAP_CHROME_BORDER,
     zIndex: 30,
     elevation: 30,
   },
+  blurWrap: {
+    ...StyleSheet.absoluteFill,
+    borderRadius: RADIUS,
+    overflow: 'hidden',
+  },
   tint: {
     ...StyleSheet.absoluteFill,
-    backgroundColor: 'rgba(15, 20, 28, 0.78)',
+    borderRadius: RADIUS,
+    backgroundColor: MAP_CHROME_TINT,
   },
   content: {
     flex: 1,
@@ -77,14 +90,14 @@ const styles = StyleSheet.create({
   },
   temperature: {
     ...typography.labelLarge,
-    color: colors.textPrimary,
+    color: mapChromeText.primary,
     fontWeight: '700',
     fontSize: 13,
     lineHeight: 15,
   },
   label: {
     ...typography.labelSmall,
-    color: colors.textTertiary,
+    color: mapChromeText.tertiary,
     fontSize: 8,
     lineHeight: 10,
     textAlign: 'center',

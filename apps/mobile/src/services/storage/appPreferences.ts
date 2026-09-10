@@ -1,12 +1,13 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { SupportedLocale } from '../../i18n/locales';
 import type { TransportMode } from '../../config/tam';
-import type { AccessibilitySettings } from '../../stores/appStore';
+import type { AccessibilitySettings, ThemePreference } from '../../stores/appStore';
 
 const STORAGE_KEY = '@goway/app-preferences';
 
 export interface PersistedAppPreferences {
   locale?: SupportedLocale;
+  themePreference?: ThemePreference;
   accessibility?: AccessibilitySettings;
   enabledTransportModes?: TransportMode[];
 }

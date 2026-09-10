@@ -3,9 +3,10 @@ import {
   gtfsTimeToDate,
   getServiceDate,
   haversineMeters,
-  routeTypeToMode,
+  routeToMode,
   getStationId,
   getStationStopIds,
+  isTripServicePreferred,
 } from './gtfsLoader.js';
 import { getTripDelay } from './gtfsRtService.js';
 import { findNearestStops } from './stopService.js';
@@ -44,10 +45,15 @@ export interface ApiRoute {
 }
 
 const MIN_TRANSFER_MINUTES = 4;
-const MAX_TRANSIT_LEG_MINUTES = 90;
-const MAX_SCAN_DEPARTURES = 120;
-const ORIGIN_STOP_RADIUS_METERS = 600;
-const DESTINATION_STOP_RADIUS_METERS = 800;
+const MAX_TRANSIT_LEG_MINUTES = 120;
+const MAX_SCAN_DEPARTURES = 160;
+const ORIGIN_STOP_RADIUS_METERS = 900;
+const DESTINATION_STOP_RADIUS_METERS = 1_500;
+/** Hubs d’origine/destination à explorer (tram + bus suburbains). */
+const STATION_HUB_LIMIT = 3;
+const STATION_HUB_SEARCH_RADIUS_METERS = 2_000;
+/** Fenêtre de départs scannés (minutes) pour les correspondances lointaines. */
+const DEPARTURE_SCAN_WINDOW_MINUTES = 60;
 
 type StopRef = {
   id: string;
@@ -142,7 +148,7 @@ function routeLineMeta(routeId: string) {
   return {
     lineName: `Ligne ${shortName}`,
     lineColor: route.route_color ? `#${route.route_color}` : LINE_COLORS[shortName] ?? '#5B8DEF',
-    mode: routeTypeToMode(route.route_type),
+    mode: routeToMode(route),
     lineId: routeId,
   };
 }
@@ -160,14 +166,8 @@ function tripModeFromId(tripId: string): TransitFilterMode | null {
 function isTripAllowed(tripId: string, allowedModes: Set<TransitFilterMode>): boolean {
   const mode = tripModeFromId(tripId);
   if (mode == null) return false;
-  if (allowedModes.has(mode)) return true;
-  if (
-    mode === 'tram_bus' &&
-    (allowedModes.has('tram') || allowedModes.has('bus'))
-  ) {
-    return true;
-  }
-  return false;
+  if (!allowedModes.has(mode)) return false;
+  return isTripServicePreferred(tripId);
 }
 
 function buildReachableStopIds(
@@ -203,13 +203,15 @@ function stopRefFromId(stopId: string): StopRef | null {
 }
 
 function getNearestStationHubs(lat: number, lon: number, limit: number): StationHub[] {
-  const nearest = findNearestStops(lat, lon, 20, 1500, false);
+  const nearest = findNearestStops(lat, lon, 40, STATION_HUB_SEARCH_RADIUS_METERS, false);
   const hubs = new Map<string, StationHub>();
 
   for (const stop of nearest) {
     const stationId = getStationId(stop.id);
     const existing = hubs.get(stationId);
-    const distance = stop.distanceMeters ?? haversineMeters(lat, lon, stop.coordinates.latitude, stop.coordinates.longitude);
+    const distance =
+      stop.distanceMeters ??
+      haversineMeters(lat, lon, stop.coordinates.latitude, stop.coordinates.longitude);
 
     if (!existing || distance < existing.distanceMeters) {
       hubs.set(stationId, {
@@ -234,17 +236,24 @@ function collectDepartures(
   const modeKey = allowedModes
     ? [...allowedModes].sort().join(',')
     : ALL_TRANSIT_FILTER_MODES.join(',');
-  const cacheKey = `${stopIds.slice().sort().join(',')}|${modeKey}`;
+  const dayKey = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Europe/Paris',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date());
+  const cacheKey = `${stopIds.slice().sort().join(',')}|${modeKey}|${dayKey}`;
   const cached = departuresCache.get(cacheKey);
   if (cached) return cached;
 
   const gtfs = getGtfs();
   const departures: DepartureCandidate[] = [];
-  const filterByMode = allowedModes != null && allowedModes.size < ALL_TRANSIT_FILTER_MODES.length;
+  const modes = allowedModes ?? new Set(ALL_TRANSIT_FILTER_MODES);
 
   for (const stopId of stopIds) {
     for (const stopTime of gtfs.stopTimesByStop.get(stopId) ?? []) {
-      if (filterByMode && !isTripAllowed(stopTime.trip_id, allowedModes)) continue;
+      // Calendrier du jour + motif « plan réseau » (évite L1 via Peyrou/Guilhem).
+      if (!isTripAllowed(stopTime.trip_id, modes)) continue;
       departures.push({
         trip_id: stopTime.trip_id,
         departure_time: stopTime.departure_time,
@@ -290,6 +299,10 @@ function findDestOnTrip(
   return best;
 }
 
+/**
+ * Rejette les tours inutiles sur les lignes en boucle (ex. tram 4).
+ * Ne s’applique pas aux lignes radiales (bus suburbains bout-en-bout).
+ */
 function isLongWayAroundTrip(
   tripId: string,
   fromStopId: string,
@@ -300,9 +313,71 @@ function isLongWayAroundTrip(
   const toIdx = getStopIndex(tripId, toStopId);
   if (fromIdx < 0 || toIdx <= fromIdx) return true;
 
+  const firstStop = getGtfs().stops.get(tripStops[0]?.stop_id);
+  const lastStop = getGtfs().stops.get(tripStops[tripStops.length - 1]?.stop_id);
+  if (!firstStop || !lastStop) return false;
+
+  const loopClosureMeters = haversineMeters(
+    firstStop.stop_lat,
+    firstStop.stop_lon,
+    lastStop.stop_lat,
+    lastStop.stop_lon
+  );
+  // Ligne linéaire / radiale : le terminus est une destination légitime.
+  if (loopClosureMeters > 250) return false;
+
   const span = toIdx - fromIdx;
-  const maxDirectSpan = Math.max(3, Math.floor(tripStops.length * 0.52));
+  const maxDirectSpan = Math.max(3, Math.floor(tripStops.length * 0.55));
   return span > maxDirectSpan;
+}
+
+/** Distance arrêt → destination (∞ si arrêt inconnu). */
+function distanceStopToPoint(stopId: string, lat: number, lon: number): number {
+  const stop = getGtfs().stops.get(stopId);
+  if (!stop) return Infinity;
+  return haversineMeters(stop.stop_lat, stop.stop_lon, lat, lon);
+}
+
+/**
+ * True si aller de from → to s’éloigne nettement de la destination
+ * (ex. monter vers le mauvais terminus puis revenir).
+ */
+function movesAwayFromDestination(
+  fromStopId: string,
+  toStopId: string,
+  destLat: number,
+  destLon: number
+): boolean {
+  const fromDist = distanceStopToPoint(fromStopId, destLat, destLon);
+  const toDist = distanceStopToPoint(toStopId, destLat, destLon);
+  if (!Number.isFinite(fromDist) || !Number.isFinite(toDist)) return false;
+  if (toDist <= fromDist) return false;
+
+  const worsen = toDist - fromDist;
+  // Tolérance : léger écart réseau (quais, petit crochet) — pas un terminus opposé.
+  const allowedWorsen = Math.max(450, fromDist * 0.18);
+  return worsen > allowedWorsen;
+}
+
+/** Correspondance « bout de ligne puis sens inverse » sur la même ligne. */
+function isSameLineUTurn(
+  tripId1: string,
+  tripId2: string,
+  boardStopId: string,
+  transferStopId: string,
+  destLat: number,
+  destLon: number
+): boolean {
+  const trip1 = getGtfs().trips.get(tripId1);
+  const trip2 = getGtfs().trips.get(tripId2);
+  if (!trip1 || !trip2) return false;
+  if (trip1.route_id !== trip2.route_id) return false;
+  if (trip1.direction_id === trip2.direction_id) return false;
+
+  // Autoriser seulement si la 1ʳᵉ jambe a déjà progressé vers la destination.
+  const boardDist = distanceStopToPoint(boardStopId, destLat, destLon);
+  const transferDist = distanceStopToPoint(transferStopId, destLat, destLon);
+  return transferDist >= boardDist * 0.85;
 }
 
 function filterBoardableDepartures(
@@ -337,12 +412,26 @@ function isRouteDominated(candidate: ApiRoute, baseline: ApiRoute): boolean {
   const walksMore = candidate.walkingMinutes > baseline.walkingMinutes;
   const leavesEarlierOrSame = candidateLeave <= baselineLeave;
 
-  return (
+  if (
     arrivesLaterOrEqual &&
     walksMore &&
     leavesEarlierOrSame &&
     candidate.totalDurationMinutes >= baseline.totalDurationMinutes
-  );
+  ) {
+    return true;
+  }
+
+  // Détour absurde : même arrivée (ou pire) avec une durée nettement plus longue.
+  const durationGap = candidate.totalDurationMinutes - baseline.totalDurationMinutes;
+  if (
+    durationGap >= 12 &&
+    candidateArrive >= baselineArrive - 2 * 60_000 &&
+    candidate.walkingMinutes >= baseline.walkingMinutes - 6
+  ) {
+    return true;
+  }
+
+  return false;
 }
 
 function filterDominatedRoutes(routes: ApiRoute[]): ApiRoute[] {
@@ -379,39 +468,40 @@ function transitPattern(route: ApiRoute): string {
     .join('|');
 }
 
-function sortRoutesByDeparture(routes: ApiRoute[]): ApiRoute[] {
+function sortRoutesByQuality(routes: ApiRoute[]): ApiRoute[] {
   return [...routes].sort(
     (a, b) =>
-      new Date(a.departureTime).getTime() - new Date(b.departureTime).getTime() ||
+      a.totalDurationMinutes - b.totalDurationMinutes ||
+      new Date(a.arrivalTime).getTime() - new Date(b.arrivalTime).getTime() ||
       a.walkingMinutes - b.walkingMinutes ||
-      a.totalDurationMinutes - b.totalDurationMinutes
+      new Date(a.departureTime).getTime() - new Date(b.departureTime).getTime()
   );
 }
 
 function dedupeRoutes(routes: ApiRoute[], count: number): ApiRoute[] {
-  const sorted = sortRoutesByDeparture(routes);
+  const sorted = sortRoutesByQuality(routes);
   const seen = new Set<string>();
   const unique: ApiRoute[] = [];
 
-  const earliestByPattern = new Map<string, ApiRoute>();
+  const bestByPattern = new Map<string, ApiRoute>();
   for (const route of sorted) {
     const pattern = transitPattern(route);
-    const existing = earliestByPattern.get(pattern);
+    const existing = bestByPattern.get(pattern);
     if (!existing) {
-      earliestByPattern.set(pattern, route);
+      bestByPattern.set(pattern, route);
       continue;
     }
-    const existingLeave = new Date(existing.departureTime).getTime();
-    const routeLeave = new Date(route.departureTime).getTime();
-    if (
-      routeLeave < existingLeave ||
-      (routeLeave === existingLeave && route.walkingMinutes < existing.walkingMinutes)
-    ) {
-      earliestByPattern.set(pattern, route);
+    // Garder le meilleur du motif (durée / arrivée), pas seulement le plus tôt.
+    const existingScore =
+      existing.totalDurationMinutes * 1000 + new Date(existing.arrivalTime).getTime() / 60_000;
+    const routeScore =
+      route.totalDurationMinutes * 1000 + new Date(route.arrivalTime).getTime() / 60_000;
+    if (routeScore < existingScore) {
+      bestByPattern.set(pattern, route);
     }
   }
 
-  for (const route of sortRoutesByDeparture([...earliestByPattern.values()])) {
+  for (const route of sortRoutesByQuality([...bestByPattern.values()])) {
     const key = routeSignature(route);
     if (seen.has(key)) continue;
     seen.add(key);
@@ -522,21 +612,38 @@ export function getItineraryStopIds(legs: ApiRouteLeg[]): string[] {
     }
 
     const tripStops = gtfs.stopTimesByTrip.get(leg.tripId) ?? [];
-    const fromIdx = tripStops.findIndex((stopTime) => stopTime.stop_id === leg.fromStopId);
-    const toIdx = tripStops.findIndex((stopTime) => stopTime.stop_id === leg.toStopId);
+    const fromId = resolveStopIdOnTrip(leg.tripId, leg.fromStopId, 'first');
+    const toId = resolveStopIdOnTrip(leg.tripId, leg.toStopId, 'last');
+    const fromIdx = tripStops.findIndex((stopTime) => stopTime.stop_id === fromId);
+    const toIdx = tripStops.findIndex((stopTime) => stopTime.stop_id === toId);
 
+    // Strict : uniquement les arrêts réellement desservis par ce trip entre montée et descente.
     if (fromIdx >= 0 && toIdx > fromIdx) {
       for (let i = fromIdx; i <= toIdx; i++) {
         ids.add(tripStops[i].stop_id);
       }
       continue;
     }
-
-    ids.add(leg.fromStopId);
-    ids.add(leg.toStopId);
+    if (fromIdx >= 0) ids.add(tripStops[fromIdx].stop_id);
+    if (toIdx >= 0) ids.add(tripStops[toIdx].stop_id);
   }
 
   return [...ids];
+}
+
+/** Map a transfer quay to the stop actually served by this trip (same station). */
+function resolveStopIdOnTrip(
+  tripId: string,
+  stopId: string,
+  prefer: 'first' | 'last'
+): string {
+  const tripStops = getGtfs().stopTimesByTrip.get(tripId) ?? [];
+  if (tripStops.some((stopTime) => stopTime.stop_id === stopId)) return stopId;
+
+  const stationStops = new Set(getStationStopIds(stopId));
+  const matches = tripStops.filter((stopTime) => stationStops.has(stopTime.stop_id));
+  if (!matches.length) return stopId;
+  return prefer === 'last' ? matches[matches.length - 1].stop_id : matches[0].stop_id;
 }
 
 export async function planRoute(
@@ -581,7 +688,11 @@ export async function buildRouteGeometryForRoute(
   destLat: number,
   destLon: number
 ): Promise<ApiRoute> {
-  return attachRouteGeometriesAsync(route, originLat, originLon, destLat, destLon);
+  const enriched = await attachRouteGeometriesAsync(route, originLat, originLon, destLat, destLon);
+  return {
+    ...enriched,
+    itineraryStopIds: getItineraryStopIds(enriched.legs),
+  };
 }
 
 async function tryOtpRoutes(
@@ -634,6 +745,9 @@ async function tryOtpRoutes(
           },
           index: number
         ): ApiRoute | null => {
+          const hasTransit = itinerary.legs.some((leg) => leg.mode !== 'WALK');
+          if (!hasTransit) return null;
+
           const legs: ApiRouteLeg[] = itinerary.legs.map((leg) => ({
             mode: leg.mode === 'WALK' ? 'walk' : ('tram' as const),
             from: leg.from.name,
@@ -679,15 +793,16 @@ function planGtfsRoutes(
   allowedModes?: TransitFilterMode[]
 ): ApiRoute[] {
   const allowed = normalizeAllowedModes(allowedModes);
-  const originHubs = getNearestStationHubs(originLat, originLon, 2);
-  const destHubs = getNearestStationHubs(destLat, destLon, 2);
+  const originHubs = getNearestStationHubs(originLat, originLon, STATION_HUB_LIMIT);
+  const destHubs = getNearestStationHubs(destLat, destLon, STATION_HUB_LIMIT);
 
   if (originHubs.length === 0 || destHubs.length === 0) return [];
 
   const candidates: ApiRoute[] = [];
   const perSearchLimit = count * 3;
+  const enoughCandidates = () => candidates.length >= count * 4;
 
-  for (const originHub of originHubs) {
+  outer: for (const originHub of originHubs) {
     for (const destHub of destHubs) {
       if (originHub.stationId === destHub.stationId) continue;
 
@@ -718,22 +833,29 @@ function planGtfsRoutes(
           serviceDate,
           perSearchLimit,
           allowed
-        ),
-        ...findOneTransferRoutes(
-          originHub,
-          destHub,
-          originStopIds,
-          destStopIds,
-          originLat,
-          originLon,
-          destLat,
-          destLon,
-          departureTime,
-          serviceDate,
-          perSearchLimit,
-          allowed
         )
       );
+
+      if (!enoughCandidates()) {
+        candidates.push(
+          ...findOneTransferRoutes(
+            originHub,
+            destHub,
+            originStopIds,
+            destStopIds,
+            originLat,
+            originLon,
+            destLat,
+            destLon,
+            departureTime,
+            serviceDate,
+            perSearchLimit,
+            allowed
+          )
+        );
+      }
+
+      if (enoughCandidates()) break outer;
     }
   }
 
@@ -765,7 +887,13 @@ function findDirectRoutes(
   const scanDepartures = sortDeparturesByLeaveTime(
     filterBoardableDepartures(
       departuresReachingDestination(
-        departuresWithinScanWindow(departures, startIndex, departureTime, 45, serviceDate),
+        departuresWithinScanWindow(
+          departures,
+          startIndex,
+          departureTime,
+          DEPARTURE_SCAN_WINDOW_MINUTES,
+          serviceDate
+        ),
         destStopIds,
         destLat,
         destLon
@@ -810,6 +938,16 @@ function findDirectRoutes(
     if (!destOnTrip) continue;
 
     if (isLongWayAroundTrip(candidate.trip_id, candidate.boardStopId, destOnTrip.stopId)) {
+      continue;
+    }
+    if (
+      movesAwayFromDestination(
+        candidate.boardStopId,
+        destOnTrip.stopId,
+        destLat,
+        destLon
+      )
+    ) {
       continue;
     }
 
@@ -932,6 +1070,55 @@ function firstDepartureIndex(
   return lo;
 }
 
+/**
+ * Arrêts où l’on peut monter sur un trajet qui dessert ensuite la destination.
+ * Évite d’essayer chaque arrêt intermédiaire comme correspondance.
+ */
+function boardingStopsReachingDestination(destStopIds: Set<string>): Set<string> {
+  if (destStopIds.size === 0) return new Set();
+
+  const gtfs = getGtfs();
+  const boarding = new Set<string>();
+
+  for (const stops of gtfs.stopTimesByTrip.values()) {
+    let firstDestIdx = -1;
+    for (let i = 0; i < stops.length; i++) {
+      if (destStopIds.has(stops[i].stop_id)) {
+        firstDestIdx = i;
+        break;
+      }
+    }
+    if (firstDestIdx <= 0) continue;
+
+    for (let i = 0; i < firstDestIdx; i++) {
+      for (const stopId of getStationStopIds(stops[i].stop_id)) {
+        boarding.add(stopId);
+      }
+    }
+  }
+
+  return boarding;
+}
+
+/** Ne garde que les départs dont le trajet croise ensuite un arrêt de correspondance utile. */
+function departuresReachingTransfers(
+  departures: DepartureCandidate[],
+  usefulTransfers: Set<string>
+): DepartureCandidate[] {
+  if (usefulTransfers.size === 0) return [];
+
+  return departures.filter((dep) => {
+    const stops = getGtfs().stopTimesByTrip.get(dep.trip_id) ?? [];
+    const boardIdx = getStopIndex(dep.trip_id, dep.boardStopId);
+    if (boardIdx < 0) return false;
+
+    for (let i = boardIdx + 1; i < stops.length; i++) {
+      if (usefulTransfers.has(stops[i].stop_id)) return true;
+    }
+    return false;
+  });
+}
+
 function findOneTransferRoutes(
   originHub: StationHub,
   destHub: StationHub,
@@ -949,13 +1136,24 @@ function findOneTransferRoutes(
   const walkToStopMin = buildWalkToStopMinutesMap(originStopIds, originLat, originLon);
   if (walkToStopMin.size === 0) return [];
 
+  const usefulTransfers = boardingStopsReachingDestination(destStopIds);
+  if (usefulTransfers.size === 0) return [];
+
   const originStopIdSet = new Set(originStopIds);
   const departures = collectDepartures(originStopIds, allowedModes);
-  const minWalkMin = earliestWalkMinutes(walkToStopMin);
   const startIndex = firstDepartureIndex(departures, departureTime, serviceDate);
   const scanDepartures = sortDeparturesByLeaveTime(
     filterBoardableDepartures(
-      departuresWithinScanWindow(departures, startIndex, departureTime, 45, serviceDate),
+      departuresReachingTransfers(
+        departuresWithinScanWindow(
+          departures,
+          startIndex,
+          departureTime,
+          DEPARTURE_SCAN_WINDOW_MINUTES,
+          serviceDate
+        ),
+        usefulTransfers
+      ),
       departureTime,
       walkToStopMin,
       serviceDate
@@ -995,9 +1193,17 @@ function findOneTransferRoutes(
     for (let transferIdx = originIdx + 1; transferIdx < trip1Stops.length; transferIdx++) {
       const transferStopId = trip1Stops[transferIdx].stop_id;
       if (originStopIdSet.has(transferStopId) || destStopIds.has(transferStopId)) continue;
+      if (!usefulTransfers.has(transferStopId)) continue;
 
       const transferRef = stopRefFromId(transferStopId);
       if (!transferRef) continue;
+
+      // Ne pas s’éloigner de la destination pour « aller au bout » avant de revenir.
+      if (
+        movesAwayFromDestination(leg1.boardStopId, transferStopId, destLat, destLon)
+      ) {
+        continue;
+      }
 
       const transferArrival = actualTime(
         leg1.trip_id,
@@ -1012,7 +1218,7 @@ function findOneTransferRoutes(
 
       const leg2Candidates = collectDepartures(getStationStopIds(transferStopId), allowedModes);
       const leg2Start = firstDepartureIndex(leg2Candidates, minConnection, serviceDate);
-      const leg2End = Math.min(leg2Candidates.length, leg2Start + 20);
+      const leg2End = Math.min(leg2Candidates.length, leg2Start + 30);
 
       for (let j = leg2Start; j < leg2End; j++) {
         const leg2 = leg2Candidates[j];
@@ -1022,10 +1228,23 @@ function findOneTransferRoutes(
         if (!trip2) continue;
         if (!isTripAllowed(leg2.trip_id, allowedModes)) continue;
 
+        if (
+          isSameLineUTurn(
+            leg1.trip_id,
+            leg2.trip_id,
+            leg1.boardStopId,
+            transferStopId,
+            destLat,
+            destLon
+          )
+        ) {
+          continue;
+        }
+
         if (leg2.boardStopId !== transferStopId) {
-          const boardIdx = getStopIndex(leg2.trip_id, leg2.boardStopId);
-          const transferIdx2 = getStopIndex(leg2.trip_id, transferStopId);
-          if (transferIdx2 === -1 || boardIdx !== transferIdx2) continue;
+          // Correspondance intramodale / quai voisin d’une même station.
+          const stationStops = new Set(getStationStopIds(transferStopId));
+          if (!stationStops.has(leg2.boardStopId)) continue;
         }
 
         const actualBoard2 = actualTime(
@@ -1047,6 +1266,16 @@ function findOneTransferRoutes(
         if (!destOnTrip) continue;
 
         if (isLongWayAroundTrip(leg2.trip_id, leg2.boardStopId, destOnTrip.stopId)) {
+          continue;
+        }
+        if (
+          movesAwayFromDestination(
+            leg2.boardStopId,
+            destOnTrip.stopId,
+            destLat,
+            destLon
+          )
+        ) {
           continue;
         }
 
@@ -1082,9 +1311,11 @@ function findOneTransferRoutes(
           leg1Min,
           trip1.trip_headsign
         );
+        const boardRef2 = stopRefFromId(leg2.boardStopId);
+        if (!boardRef2) continue;
         const transitLeg2 = buildTransitLeg(
           leg2.trip_id,
-          transferRef,
+          boardRef2,
           alightRef,
           leg2Min,
           trip2.trip_headsign

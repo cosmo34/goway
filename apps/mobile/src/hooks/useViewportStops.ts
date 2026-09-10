@@ -65,10 +65,8 @@ export function useViewportStops(
         stopsRef.current = pruned;
         onUpdate(pruned);
       } catch {
-        if (currentSeq === seq.current) {
-          stopsRef.current = [];
-          onUpdate([]);
-        }
+        // Garder les stations déjà chargées si l’API est temporairement indisponible.
+        if (currentSeq !== seq.current) return;
       }
     }, DEBOUNCE_MS);
 

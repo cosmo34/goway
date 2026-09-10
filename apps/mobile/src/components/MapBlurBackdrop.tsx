@@ -2,10 +2,13 @@ import { type ComponentType } from 'react';
 import { View, StyleSheet, Platform } from 'react-native';
 import { BlurView } from 'expo-blur';
 import type { AppViewStyle } from '../types/styles';
+import { useTheme } from '../theme/ThemeContext';
+
+type BlurTint = 'systemUltraThinMaterialDark' | 'systemUltraThinMaterialLight';
 
 const BlurBackdrop = BlurView as unknown as ComponentType<{
   intensity: number;
-  tint: 'systemUltraThinMaterialDark';
+  tint: BlurTint;
   style: typeof StyleSheet.absoluteFill;
 }>;
 
@@ -60,8 +63,17 @@ function buildVerticalFadeBands(direction: BlurFadeDirection): BlurBandLayout[] 
 }
 
 export function MapBlurBackdrop({ fadeDirection, bleed }: MapBlurBackdropProps) {
+  const { colors, isDark } = useTheme();
+  const tint: BlurTint = isDark
+    ? 'systemUltraThinMaterialDark'
+    : 'systemUltraThinMaterialLight';
+
   if (Platform.OS !== 'ios') {
-    return <View style={[StyleSheet.absoluteFill, styles.androidFallback]} />;
+    return (
+      <View
+        style={[StyleSheet.absoluteFill, { backgroundColor: colors.blurFallback }]}
+      />
+    );
   }
 
   return (
@@ -82,7 +94,7 @@ export function MapBlurBackdrop({ fadeDirection, bleed }: MapBlurBackdropProps) 
         >
           <BlurBackdrop
             intensity={Math.max(1, band.intensity)}
-            tint="systemUltraThinMaterialDark"
+            tint={tint}
             style={StyleSheet.absoluteFill}
           />
         </View>
@@ -102,8 +114,5 @@ const styles = StyleSheet.create({
   blurBand: {
     position: 'absolute',
     overflow: 'hidden',
-  },
-  androidFallback: {
-    backgroundColor: 'rgba(21, 27, 36, 0.22)',
   },
 });

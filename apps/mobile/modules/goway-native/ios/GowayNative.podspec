@@ -12,5 +12,5 @@ Pod::Spec.new do |s|
   s.source_files   = '**/*.swift'
   s.dependency 'ExpoModulesCore'
   s.dependency 'GowayShared'
-  s.frameworks     = 'ActivityKit'
+  s.frameworks     = 'ActivityKit', 'MapKit', 'CoreLocation'
 end

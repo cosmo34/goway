@@ -24,6 +24,7 @@ export interface GtfsRoute {
 export interface GtfsTrip {
   trip_id: string;
   route_id: string;
+  service_id: string;
   trip_headsign: string;
   direction_id: string;
   shape_id?: string;
@@ -52,6 +53,17 @@ export interface GtfsData {
   stopTimesByTrip: Map<string, GtfsStopTime[]>;
   /** station (parent_station ou stop_id) → quais / arrêts enfants */
   stopsByStation: Map<string, string[]>;
+  calendars: Map<
+    string,
+    {
+      days: boolean[];
+      start_date: string;
+      end_date: string;
+    }
+  >;
+  calendarDates: Map<string, Map<string, number>>;
+  tripPatternByTrip: Map<string, string>;
+  preferredPatternByRouteDir: Map<string, string>;
   loadedAt: Date;
 }
 
@@ -117,6 +129,10 @@ export async function loadGtfs(force = false): Promise<GtfsData> {
   const tripsRaw = parseCsv<Record<string, string>>(readZipCsv(zip, 'trips.txt') ?? '');
   const stopTimesRaw = parseCsv<Record<string, string>>(readZipCsv(zip, 'stop_times.txt') ?? '');
   const shapesRaw = parseCsv<Record<string, string>>(readZipCsv(zip, 'shapes.txt') ?? '');
+  const calendarRaw = parseCsv<Record<string, string>>(readZipCsv(zip, 'calendar.txt') ?? '');
+  const calendarDatesRaw = parseCsv<Record<string, string>>(
+    readZipCsv(zip, 'calendar_dates.txt') ?? ''
+  );
 
   const stops = new Map<string, GtfsStop>();
   for (const s of stopsRaw) {
@@ -146,10 +162,39 @@ export async function loadGtfs(force = false): Promise<GtfsData> {
     trips.set(t.trip_id, {
       trip_id: t.trip_id,
       route_id: t.route_id,
+      service_id: t.service_id ?? '',
       trip_headsign: t.trip_headsign,
       direction_id: t.direction_id,
       shape_id: t.shape_id || undefined,
     });
+  }
+
+  const calendars = new Map<
+    string,
+    { days: boolean[]; start_date: string; end_date: string }
+  >();
+  for (const row of calendarRaw) {
+    if (!row.service_id) continue;
+    calendars.set(row.service_id, {
+      days: [
+        row.monday === '1',
+        row.tuesday === '1',
+        row.wednesday === '1',
+        row.thursday === '1',
+        row.friday === '1',
+        row.saturday === '1',
+        row.sunday === '1',
+      ],
+      start_date: row.start_date,
+      end_date: row.end_date,
+    });
+  }
+
+  const calendarDates = new Map<string, Map<string, number>>();
+  for (const row of calendarDatesRaw) {
+    if (!row.service_id || !row.date) continue;
+    if (!calendarDates.has(row.service_id)) calendarDates.set(row.service_id, new Map());
+    calendarDates.get(row.service_id)!.set(row.date, parseInt(row.exception_type, 10));
   }
 
   const shapes = new Map<string, GtfsShapePoint[]>();
@@ -202,6 +247,57 @@ export async function loadGtfs(force = false): Promise<GtfsData> {
     stopsByStation.get(stationId)!.push(stop.stop_id);
   }
 
+  const tripPatternByTrip = new Map<string, string>();
+  const patternStats = new Map<
+    string,
+    Map<string, { count: number; sampleTripId: string; landmarkScore: number }>
+  >();
+
+  for (const trip of trips.values()) {
+    const times = stopTimesByTrip.get(trip.trip_id) ?? [];
+    const pattern = times.map((stopTime) => stopTime.stop_id).join('>');
+    tripPatternByTrip.set(trip.trip_id, pattern);
+
+    const routeDir = `${trip.route_id}:${trip.direction_id}`;
+    if (!patternStats.has(routeDir)) patternStats.set(routeDir, new Map());
+    const byPattern = patternStats.get(routeDir)!;
+    const existing = byPattern.get(pattern);
+    if (existing) {
+      existing.count += 1;
+    } else {
+      let landmarkScore = 0;
+      for (const stopTime of times) {
+        const name = (stops.get(stopTime.stop_id)?.stop_name ?? '').toLowerCase();
+        if (name.includes('comédie') || name.includes('comedie')) landmarkScore += 8;
+        if (name.includes('corum')) landmarkScore += 4;
+        // Corridor typique L4/L5 parfois publié à tort sous route 1.
+        if (name.includes('peyrou')) landmarkScore -= 3;
+        if (name.includes('guilhem')) landmarkScore -= 3;
+        if (name.includes('observatoire')) landmarkScore -= 3;
+      }
+      byPattern.set(pattern, {
+        count: 1,
+        sampleTripId: trip.trip_id,
+        landmarkScore,
+      });
+    }
+  }
+
+  const preferredPatternByRouteDir = new Map<string, string>();
+  for (const [routeDir, byPattern] of patternStats) {
+    let bestPattern: string | null = null;
+    let bestScore = -Infinity;
+    for (const [pattern, stats] of byPattern) {
+      // Préférer le motif « plan réseau » (landmarks) puis la fréquence.
+      const score = stats.landmarkScore * 1000 + stats.count;
+      if (score > bestScore) {
+        bestScore = score;
+        bestPattern = pattern;
+      }
+    }
+    if (bestPattern) preferredPatternByRouteDir.set(routeDir, bestPattern);
+  }
+
   cachedData = {
     stops,
     routes,
@@ -210,11 +306,15 @@ export async function loadGtfs(force = false): Promise<GtfsData> {
     stopTimesByStop,
     stopTimesByTrip,
     stopsByStation,
+    calendars,
+    calendarDates,
+    tripPatternByTrip,
+    preferredPatternByRouteDir,
     loadedAt: new Date(),
   };
 
   console.log(
-    `[GTFS] Chargé: ${stops.size} arrêts, ${routes.size} lignes, ${trips.size} trajets, ${shapes.size} tracés`
+    `[GTFS] Chargé: ${stops.size} arrêts, ${routes.size} lignes, ${trips.size} trajets, ${shapes.size} tracés, ${preferredPatternByRouteDir.size} motifs préférés`
   );
 
   return cachedData;
@@ -300,6 +400,54 @@ export function getServiceDate(): Date {
   return new Date(getParisMidnightMs());
 }
 
+/** YYYYMMDD Europe/Paris pour une date. */
+export function toParisServiceDay(refDate = new Date()): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Europe/Paris',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  })
+    .format(refDate)
+    .replaceAll('-', '');
+}
+
+export function isServiceActiveOnDate(serviceId: string, refDate = new Date()): boolean {
+  if (!serviceId) return true;
+  const gtfs = getGtfs();
+  const day = toParisServiceDay(refDate);
+  const exception = gtfs.calendarDates.get(serviceId)?.get(day);
+  if (exception === 2) return false;
+  if (exception === 1) return true;
+
+  const calendar = gtfs.calendars.get(serviceId);
+  if (!calendar) {
+    // Pas de règle calendar : n’autoriser que si une exception explicite existe ailleurs.
+    return gtfs.calendarDates.has(serviceId) ? false : true;
+  }
+  if (day < calendar.start_date || day > calendar.end_date) return false;
+
+  const weekday = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Europe/Paris',
+    weekday: 'short',
+  }).format(refDate);
+  const gtfsDayIndex = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].indexOf(weekday);
+  if (gtfsDayIndex < 0) return false;
+  return calendar.days[gtfsDayIndex] === true;
+}
+
+/** Trip autorisé aujourd’hui (calendrier) et sur le motif de ligne préféré. */
+export function isTripServicePreferred(tripId: string, refDate = new Date()): boolean {
+  const gtfs = getGtfs();
+  const trip = gtfs.trips.get(tripId);
+  if (!trip) return false;
+  if (!isServiceActiveOnDate(trip.service_id, refDate)) return false;
+
+  const preferred = gtfs.preferredPatternByRouteDir.get(`${trip.route_id}:${trip.direction_id}`);
+  if (!preferred) return true;
+  return gtfs.tripPatternByTrip.get(tripId) === preferred;
+}
+
 export function haversineMeters(
   lat1: number,
   lon1: number,
@@ -316,9 +464,43 @@ export function haversineMeters(
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-export function routeTypeToMode(routeType: string): 'tram' | 'bus' | 'tram_bus' {
+/**
+ * Modes GOWAY :
+ * - tram : route_type 0 (lignes 1–5)
+ * - bus : route_type 3 + familles étendus GTFS 700–799 (ex. 715 suburbains)
+ * - tram_bus : Bustram TaM (ligne A, futures lettres BHNS) — en GTFS souvent type 3
+ */
+export type TransitMode = 'tram' | 'bus' | 'tram_bus';
+
+export function isBustramRoute(route: {
+  route_short_name: string;
+  route_long_name?: string;
+}): boolean {
+  const short = route.route_short_name.trim().toUpperCase();
+  // Indices alphabétiques du réseau Bustram (A en service ; B–E à venir)
+  if (/^[A-E]$/.test(short)) return true;
+  const long = (route.route_long_name ?? '').toLowerCase();
+  return /bus\s*-?\s*tram|tram\s*-?\s*bus|bustram/.test(long);
+}
+
+export function routeToMode(route: {
+  route_type: string;
+  route_short_name: string;
+  route_long_name?: string;
+}): TransitMode {
+  if (isBustramRoute(route)) return 'tram_bus';
+
+  const t = parseInt(route.route_type, 10);
+  if (t === 0 || t === 5) return 'tram';
+  // Bus classique + famille étendue 700–799 (715 = bus à la demande / suburbain TaM)
+  if (t === 3 || t === 11 || (t >= 700 && t < 800)) return 'bus';
+  return 'bus';
+}
+
+/** @deprecated Préférer `routeToMode(route)` — le seul type GTFS ne suffit pas (Bustram A = type 3). */
+export function routeTypeToMode(routeType: string): TransitMode {
   const t = parseInt(routeType, 10);
-  if (t === 0) return 'tram';
-  if (t === 3) return 'bus';
-  return 'tram_bus';
+  if (t === 0 || t === 5) return 'tram';
+  if (t === 3 || t === 11 || (t >= 700 && t < 800)) return 'bus';
+  return 'bus';
 }

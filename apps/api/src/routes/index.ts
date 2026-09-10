@@ -12,7 +12,7 @@ import { searchPlaces } from '../services/placesService.js';
 import { geocodePlace, rankGeocodingResults } from '../services/geocodingService.js';
 import { fetchNearbyPois } from '../services/poiService.js';
 import { getServiceAlerts, getVehiclePositions, getLastRtFetch } from '../services/gtfsRtService.js';
-import { listLines, getLineDetail } from '../services/lineService.js';
+import { listLines, listLineShapes, getLineDetail } from '../services/lineService.js';
 
 export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get('/health', async () => ({
@@ -87,7 +87,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get<{ Params: { id: string }; Querystring: { count?: string } }>(
     '/api/stops/:id/departures',
     async (req) => {
-      const count = parseInt(req.query.count ?? '10', 10);
+      // `count` = max départs par ligne + direction (pas un plafond global)
+      const count = parseInt(req.query.count ?? '5', 10);
       return getDepartures(req.params.id, count);
     }
   );
@@ -176,7 +177,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       {
         ...route,
         geometry: [],
-        itineraryStopIds: route.itineraryStopIds ?? getItineraryStopIds(route.legs),
+        itineraryStopIds:
+          route.itineraryStopIds && route.itineraryStopIds.length > 0
+            ? route.itineraryStopIds
+            : getItineraryStopIds(route.legs),
       },
       originLat,
       originLon,
@@ -284,6 +288,23 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         }
       : undefined;
     return listLines(bbox);
+  });
+
+  // Avant /api/lines/:id pour ne pas capturer "shapes" comme id
+  app.get<{
+    Querystring: { north?: string; south?: string; east?: string; west?: string };
+  }>('/api/lines/shapes', async (req) => {
+    const { north, south, east, west } = req.query;
+    const hasBbox = [north, south, east, west].every((v) => v != null && v !== '');
+    const bbox = hasBbox
+      ? {
+          north: parseFloat(north!),
+          south: parseFloat(south!),
+          east: parseFloat(east!),
+          west: parseFloat(west!),
+        }
+      : undefined;
+    return listLineShapes(bbox);
   });
 
   app.get<{ Params: { id: string }; Querystring: { direction?: string } }>(

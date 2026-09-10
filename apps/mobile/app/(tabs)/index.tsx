@@ -1,5 +1,5 @@
 import { useRef, useCallback, useEffect, useMemo, useState } from 'react';
-import { View, StyleSheet, KeyboardAvoidingView, Platform, Keyboard, Text } from 'react-native';
+import { View, StyleSheet, KeyboardAvoidingView, Platform, Keyboard, Dimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Haptics from 'expo-haptics';
 import { TransitMap, type TransitMapHandle } from '../../src/components/TransitMap';
@@ -12,9 +12,12 @@ import { MapFloatingControls } from '../../src/components/MapFloatingControls';
 import { MapLayersSheet } from '../../src/components/MapLayersSheet';
 import { StopInfoCard } from '../../src/components/StopInfoCard';
 import { PlanningRouteCard } from '../../src/components/PlanningRouteCard';
+import { ChatModePanel } from '../../src/components/ChatModePanel';
+import { MapModeToggle, type MapInteractionMode } from '../../src/components/MapModeToggle';
+import { PlaceProposalControls } from '../../src/components/PlaceProposalControls';
 import { useMapVignetteLayout } from '../../src/hooks/useMapVignetteLayout';
 import { useViewportStops } from '../../src/hooks/useViewportStops';
-import { MapWeatherWidget } from '../../src/components/MapWeatherWidget';
+import { MapWeatherWidget, MAP_WEATHER_WIDGET_SIZE } from '../../src/components/MapWeatherWidget';
 import { useMapWeather } from '../../src/hooks/useMapWeather';
 import { useTransitStore } from '../../src/stores/transitStore';
 import type {
@@ -27,6 +30,7 @@ import type {
 } from '../../src/stores/transitStore';
 import { useAppStore } from '../../src/stores/appStore';
 import { useUserLocation } from '../../src/hooks/useUserLocation';
+import { useUserHeading } from '../../src/hooks/useUserHeading';
 import { useNavigationTracking } from '../../src/hooks/useNavigationTracking';
 import { gtfsService } from '../../src/services/gtfs/gtfsService';
 import {
@@ -38,13 +42,34 @@ import {
   findBoardingStop,
   buildRouteMapSegments,
 } from '../../src/services/routing/routingService';
-import { buildNavigationSteps, buildWalkingNavigationSteps, createWalkOnlyRoute } from '../../src/services/routing/navigationSteps';
-import { searchPlacesApi, getLineDetailApi, buildRouteGeometryApi } from '../../src/services/api/transitApi';
+import {
+  buildNavigationSteps,
+  buildWalkingNavigationSteps,
+  createWalkOnlyRoute,
+  type NavigationStep,
+} from '../../src/services/routing/navigationSteps';
+import { searchPlacesApi, getLineDetailApi, buildRouteGeometryApi, listLineShapesApi, type LineShape } from '../../src/services/api/transitApi';
+import {
+  createInitialChatState,
+  handleChatUserText,
+  handleChatQuickReply,
+  handleChatPlaceSelect,
+  chatPhaseAfterRoute,
+  setNavigationGuidance,
+} from '../../src/services/chat/chatAgent';
+import {
+  formatStepGuidance,
+  type ChatSessionState,
+  type ChatTripRequest,
+} from '../../src/services/chat/chatTypes';
 import { colors, spacing } from '../../src/theme';
 import type { Region } from 'react-native-maps';
 import { defaultMapRegion } from '../../src/utils/mapRegion';
 import { clusterId, clusterStops } from '../../src/utils/clusterStops';
+import { stopMatchesEnabledModes } from '../../src/utils/transportModeFilter';
 import { mergeSearchSuggestions, searchPlacesLocally } from '../../src/utils/localPlaceSearch';
+import { getPlaceProposalParts } from '../../src/utils/placeProposalLabel';
+import { haversineMeters, nearestPointOnPath, walkGuidanceHeading } from '../../src/utils/geo';
 import type { Departure } from '../../src/stores/transitStore';
 import { useTranslation } from 'react-i18next';
 
@@ -60,12 +85,21 @@ export default function MapScreen() {
   const hasCentered = useRef(false);
   const navigationActive = useTransitStore((state) => state.navigationActive);
   const { location, refresh: refreshLocation } = useUserLocation(true, navigationActive);
+  const [interactionMode, setInteractionMode] = useState<MapInteractionMode>('chat');
+  const [chatState, setChatState] = useState<ChatSessionState>(() =>
+    createInitialChatState((key) => t(key))
+  );
+  const chatStateRef = useRef(chatState);
+  chatStateRef.current = chatState;
+  const chatBusyRef = useRef(false);
+  const lastGuidedStepRef = useRef<number>(-1);
   const [showStops, setShowStops] = useState(true);
   const [showPois, setShowPois] = useState(true);
   const [layersSheetOpen, setLayersSheetOpen] = useState(false);
   const [mapRegion, setMapRegion] = useState<Region>(defaultMapRegion());
   const [selectedLine, setSelectedLine] = useState<TransitLine | null>(null);
   const [lineDetail, setLineDetail] = useState<TransitLineDetail | null>(null);
+  const [networkLineShapes, setNetworkLineShapes] = useState<LineShape[]>([]);
   const [stopDeparturesLoading, setStopDeparturesLoading] = useState(false);
   const [departuresByStop, setDeparturesByStop] = useState<Record<string, Departure[]>>({});
   const [routePathsById, setRoutePathsById] = useState<Record<string, Coordinates[]>>({});
@@ -137,11 +171,29 @@ export default function MapScreen() {
 
       const stops = useTransitStore.getState().mapStops;
       const quickStops = collectRouteStopsSync(routes[0], stops);
+      setLineDetail(null);
       setPlannedRoutes(routes, quickStops, findBoardingStop(routes[0], quickStops));
       setIsPlanningRoute(false);
       setRouteSearchSettled(true);
     },
     [setPlannedRoutes]
+  );
+
+  const enterWalkStreetView = useCallback(
+    (step: NavigationStep, coords: Coordinates, compassHeading?: number | null) => {
+      const heading = walkGuidanceHeading(
+        coords,
+        step.pathCoordinates,
+        step.to,
+        compassHeading
+      );
+      mapRef.current?.followUser(coords, heading);
+      // Seconde passe : gagne contre un éventuel fitRoute / animation overview encore en cours.
+      setTimeout(() => {
+        mapRef.current?.followUser(coords, heading);
+      }, 450);
+    },
+    []
   );
 
   const enrichedRoutesRef = useRef(enrichedRoutesById);
@@ -206,6 +258,8 @@ export default function MapScreen() {
 
   useEffect(() => {
     if (!originCoordinates || !destinationCoordinates || routeOptions.length === 0) return;
+    // Pendant la navigation, ne pas recentrer en vue d’ensemble (écrase le POV rue).
+    if (navigationActive) return;
     const preview = routeOptions[previewRouteIndex] ?? routeOptions[0];
     void fetchRouteGeometry(preview, originCoordinates, destinationCoordinates, { fit: true });
     for (const route of routeOptions) {
@@ -219,6 +273,7 @@ export default function MapScreen() {
     originCoordinates,
     destinationCoordinates,
     fetchRouteGeometry,
+    navigationActive,
   ]);
 
   useEffect(() => {
@@ -234,6 +289,27 @@ export default function MapScreen() {
 
   const itineraryVisible = routeOptions.length > 0 || navigationActive;
   const viewportStopsEnabled = showStops && !lineDetail && !itineraryVisible;
+
+  useEffect(() => {
+    if (interactionMode !== 'map') return;
+    let cancelled = false;
+
+    const loadShapes = () => {
+      void listLineShapesApi()
+        .then((shapes) => {
+          if (!cancelled) setNetworkLineShapes(shapes);
+        })
+        .catch(() => {
+          if (!cancelled) setNetworkLineShapes([]);
+        });
+    };
+
+    loadShapes();
+    return () => {
+      cancelled = true;
+    };
+  }, [interactionMode, modesKey]);
+
   const handleViewportStops = useCallback(
     (stops: Stop[]) => {
       const { routeOptions: plannedRoutes, navigationActive: navigating } =
@@ -266,16 +342,23 @@ export default function MapScreen() {
   const handleStopClusterPress = useCallback(
     (stops: Stop[]) => {
       if (hapticFeedback) Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-      const nextClusterId = clusterId(stops);
+      const filtered = stops.filter((stop) =>
+        stopMatchesEnabledModes(stop, enabledTransportModes)
+      );
+      if (filtered.length === 0) {
+        setSelectedStops([]);
+        return;
+      }
+      const nextClusterId = clusterId(filtered);
       const currentClusterId =
         selectedStops.length > 0 ? clusterId(selectedStops) : null;
       if (currentClusterId === nextClusterId) {
         setSelectedStops([]);
         return;
       }
-      setSelectedStops(stops);
+      setSelectedStops(filtered);
     },
-    [selectedStops, setSelectedStops, hapticFeedback]
+    [selectedStops, setSelectedStops, hapticFeedback, enabledTransportModes]
   );
 
   const handleNavigateToStop = useCallback(
@@ -326,7 +409,7 @@ export default function MapScreen() {
             walking.minutes
           );
           startNavigation(steps);
-          mapRef.current?.fitRoute(walking.path);
+          if (steps[0]) enterWalkStreetView(steps[0], origin, null);
 
           if (hapticFeedback) {
             Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
@@ -359,7 +442,21 @@ export default function MapScreen() {
           return;
         }
 
-        await startWalkingNavigation();
+        // Marche seule uniquement pour les arrêts vraiment proches.
+        const walkMeters = haversineMeters(origin, stop.coordinates);
+        if (walkMeters <= 2_500) {
+          await startWalkingNavigation();
+          return;
+        }
+
+        setOriginCoordinates(origin);
+        setDestinationCoordinates(stop.coordinates);
+        setDestinationLabel(stop.name);
+        setSearchQuery('');
+        setRouteSearchSettled(true);
+        if (hapticFeedback) {
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+        }
       } catch {
         if (seq === planSeqRef.current) {
           setIsPlanningRoute(false);
@@ -387,6 +484,7 @@ export default function MapScreen() {
       stopNavigation,
       startNavigation,
       applyPlannedRoutes,
+      enterWalkStreetView,
     ]
   );
 
@@ -422,37 +520,50 @@ export default function MapScreen() {
   );
 
   const handleMapRegionChange = useCallback((region: Region) => {
-    setMapRegion(region);
+    // Évite les re-renders à haute fréquence (marqueurs / météo qui clignotent).
+    setMapRegion((prev) => {
+      const sameCell =
+        prev.latitude.toFixed(3) === region.latitude.toFixed(3) &&
+        prev.longitude.toFixed(3) === region.longitude.toFixed(3) &&
+        Math.abs(prev.latitudeDelta - region.latitudeDelta) < prev.latitudeDelta * 0.08;
+      return sameCell ? prev : region;
+    });
   }, []);
 
   const previewItineraryRoute = routeOptions[previewRouteIndex] ?? activeRoute;
+  const previewRouteForStops = useMemo(() => {
+    if (!previewItineraryRoute) return null;
+    const enriched = enrichedRoutesById[previewItineraryRoute.id];
+    if (enriched?.itineraryStopIds?.length) return enriched;
+    return previewItineraryRoute;
+  }, [previewItineraryRoute, enrichedRoutesById]);
 
   const visibleStops = useMemo(() => {
-    if (lineDetail) return [];
-    if (itineraryVisible && previewItineraryRoute) {
-      return mergeRouteStops(previewItineraryRoute, routeStops, mapStops);
+    if (itineraryVisible && previewRouteForStops) {
+      return mergeRouteStops(previewRouteForStops, routeStops, mapStops);
     }
     if (itineraryVisible) return routeStops;
+    if (lineDetail) return [];
     return showStops ? mapStops : [];
   }, [
     lineDetail,
     itineraryVisible,
-    previewItineraryRoute,
+    previewRouteForStops,
     routeStops,
     mapStops,
     showStops,
   ]);
 
   useEffect(() => {
-    if (!itineraryVisible || !previewItineraryRoute) return;
+    if (!itineraryVisible || !previewRouteForStops) return;
 
     let cancelled = false;
     const cachedStops = useTransitStore.getState().mapStops;
 
-    void collectRouteStops(previewItineraryRoute, cachedStops).then((fullStops) => {
+    void collectRouteStops(previewRouteForStops, cachedStops).then((fullStops) => {
       if (cancelled) return;
       setRouteStops(fullStops);
-      setBoardingStop(findBoardingStop(previewItineraryRoute, fullStops));
+      setBoardingStop(findBoardingStop(previewRouteForStops, fullStops));
     });
 
     return () => {
@@ -460,13 +571,24 @@ export default function MapScreen() {
     };
   }, [
     itineraryVisible,
-    previewItineraryRoute,
+    previewRouteForStops,
     setRouteStops,
     setBoardingStop,
   ]);
 
   const lineStops = lineDetail?.stops ?? [];
-  const mapDisplayStops = lineStops.length > 0 ? lineStops : visibleStops;
+  const mapDisplayStops = useMemo(() => {
+    // Pendant un itinéraire, ne montrer que les arrêts de l’itinéraire (pas le détail de ligne).
+    if (itineraryVisible) return visibleStops;
+    const base = lineStops.length > 0 ? lineStops : visibleStops;
+    if (lineStops.length > 0) return base;
+    return base.filter((stop) => stopMatchesEnabledModes(stop, enabledTransportModes));
+  }, [
+    lineStops,
+    visibleStops,
+    itineraryVisible,
+    enabledTransportModes,
+  ]);
   const stopClusters = useMemo(
     () => clusterStops(mapDisplayStops, mapRegion.latitudeDelta),
     [mapDisplayStops, mapRegion.latitudeDelta]
@@ -497,6 +619,10 @@ export default function MapScreen() {
     ? navigationSteps[navigationStepIndex]
     : undefined;
 
+  const walkNavigationActive =
+    navigationActive && currentNavigationStep?.kind === 'walk';
+  const userHeading = useUserHeading(!!walkNavigationActive);
+
   useNavigationTracking({
     navigationActive,
     navigationStepIndex,
@@ -507,17 +633,157 @@ export default function MapScreen() {
     advanceNavigationStep,
   });
 
+  const lastFollowAtRef = useRef(0);
+  const lastFollowHeadingRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!walkNavigationActive || !location || !currentNavigationStep) return;
+    const now = Date.now();
+    const guidanceHeading = walkGuidanceHeading(
+      location,
+      currentNavigationStep.pathCoordinates,
+      currentNavigationStep.to,
+      userHeading
+    );
+    const headingDelta =
+      lastFollowHeadingRef.current != null
+        ? Math.abs(guidanceHeading - lastFollowHeadingRef.current)
+        : 999;
+    const headingChanged = headingDelta > 6 && headingDelta < 354;
+    if (now - lastFollowAtRef.current < 250 && !headingChanged) return;
+    lastFollowAtRef.current = now;
+    lastFollowHeadingRef.current = guidanceHeading;
+    mapRef.current?.followUser(location, guidanceHeading);
+  }, [
+    walkNavigationActive,
+    location?.latitude,
+    location?.longitude,
+    userHeading,
+    currentNavigationStep,
+  ]);
+
+  // Entrée / retour en vue rue dès qu’une étape marche commence.
+  useEffect(() => {
+    if (!walkNavigationActive || !currentNavigationStep) return;
+    const coords = location ?? currentNavigationStep.from;
+    enterWalkStreetView(currentNavigationStep, coords, userHeading);
+  }, [walkNavigationActive, navigationStepIndex]);
+
+  useEffect(() => {
+    if (interactionMode !== 'chat' || !navigationActive || !currentNavigationStep) return;
+    if (lastGuidedStepRef.current === navigationStepIndex) return;
+    lastGuidedStepRef.current = navigationStepIndex;
+    const distanceMeters = location
+      ? Math.round(haversineMeters(location, currentNavigationStep.to) / 25) * 25
+      : null;
+    const guidance = formatStepGuidance(
+      currentNavigationStep,
+      navigationStepIndex,
+      navigationSteps.length,
+      distanceMeters
+    );
+    setChatState((prev) => {
+      const next = setNavigationGuidance(prev, guidance);
+      chatStateRef.current = next;
+      return next;
+    });
+  }, [
+    interactionMode,
+    navigationActive,
+    currentNavigationStep,
+    navigationStepIndex,
+    navigationSteps.length,
+  ]);
+
+  // Rafraîchir la distance affichée (~25 m) sans empiler de messages.
+  useEffect(() => {
+    if (interactionMode !== 'chat' || !navigationActive || !currentNavigationStep || !location) {
+      return;
+    }
+    if (lastGuidedStepRef.current !== navigationStepIndex) return;
+    if (currentNavigationStep.kind === 'arrive') return;
+
+    const distanceMeters = Math.round(haversineMeters(location, currentNavigationStep.to) / 25) * 25;
+    const guidance = formatStepGuidance(
+      currentNavigationStep,
+      navigationStepIndex,
+      navigationSteps.length,
+      distanceMeters
+    );
+    setChatState((prev) => {
+      const last = [...prev.messages].reverse().find((m) => m.kind === 'nav-step');
+      if (!last || last.text === guidance) return prev;
+      const next = setNavigationGuidance(prev, guidance);
+      chatStateRef.current = next;
+      return next;
+    });
+  }, [
+    interactionMode,
+    navigationActive,
+    currentNavigationStep,
+    navigationStepIndex,
+    navigationSteps.length,
+    location?.latitude,
+    location?.longitude,
+  ]);
+
+  const wasNavigatingRef = useRef(false);
+  useEffect(() => {
+    if (interactionMode !== 'chat') return;
+    if (navigationActive) {
+      wasNavigatingRef.current = true;
+      return;
+    }
+    if (!wasNavigatingRef.current) return;
+    wasNavigatingRef.current = false;
+    if (chatStateRef.current.phase !== 'navigating') return;
+    setChatState((prev) => {
+      const next = chatPhaseAfterRoute({ ...prev, phase: 'done' }, t('chat.arrived'), true, t);
+      chatStateRef.current = next;
+      return next;
+    });
+  }, [interactionMode, navigationActive, t]);
+
+  const fullRoutePath = useMemo(() => {
+    if (displayedPath?.length) return displayedPath;
+    if (routeMapSegments.length > 0) {
+      return routeMapSegments.flatMap((segment) => segment.coordinates);
+    }
+    return undefined;
+  }, [displayedPath, routeMapSegments]);
+
+  const activeStepPath =
+    navigationActive && currentNavigationStep?.pathCoordinates?.length
+      ? currentNavigationStep.pathCoordinates
+      : undefined;
+
+  const routeProgressCoordinate = useMemo(() => {
+    if (!navigationActive || !location) return null;
+    const path =
+      (fullRoutePath && fullRoutePath.length >= 2 ? fullRoutePath : null) ??
+      (activeStepPath && activeStepPath.length >= 2 ? activeStepPath : null);
+    if (!path) return null;
+    return nearestPointOnPath(location, path);
+  }, [navigationActive, location, fullRoutePath, activeStepPath]);
+
   const activeMapPath =
     displayedPath?.length
       ? displayedPath
-      : navigationActive && currentNavigationStep?.pathCoordinates?.length
-        ? currentNavigationStep.pathCoordinates
-        : undefined;
+      : activeStepPath;
 
   useEffect(() => {
-    if (!navigationActive || !displayedPath?.length) return;
+    if (!navigationActive || !activeStepPath?.length) return;
+    // En marche : le followUser gère le POV — ne pas fitRoute.
+    if (currentNavigationStep?.kind === 'walk') return;
+    mapRef.current?.fitRoute(activeStepPath);
+  }, [navigationActive, navigationStepIndex, activeStepPath, currentNavigationStep?.kind]);
+
+  // Eviter le fit global qui écrase le focus étape / POV marche.
+  useEffect(() => {
+    if (!navigationActive || activeStepPath?.length) return;
+    if (currentNavigationStep?.kind === 'walk') return;
+    if (!displayedPath?.length) return;
     mapRef.current?.fitRoute(displayedPath);
-  }, [navigationActive, displayedPath]);
+  }, [navigationActive, displayedPath, activeStepPath, currentNavigationStep?.kind]);
 
   const handlePreviewRoute = useCallback(
     (index: number) => {
@@ -545,7 +811,7 @@ export default function MapScreen() {
       setSelectedRouteIndex(index);
       Keyboard.dismiss();
 
-      const enriched = await fetchRouteGeometry(route, origin, destination, { fit: true });
+      const enriched = await fetchRouteGeometry(route, origin, destination, { fit: false });
       setActiveRoute(enriched);
       const stops = await collectRouteStops(enriched, mapStops);
       setRouteStops(stops);
@@ -554,7 +820,13 @@ export default function MapScreen() {
       const steps = buildNavigationSteps(enriched, origin, destination, stops);
       startNavigation(steps);
 
-      if (enriched.geometry?.length) {
+      const firstStep = steps[0];
+      if (firstStep?.kind === 'walk') {
+        const followCoords = location ?? origin;
+        enterWalkStreetView(firstStep, followCoords, null);
+      } else if (firstStep?.pathCoordinates?.length) {
+        mapRef.current?.fitRoute(firstStep.pathCoordinates);
+      } else if (enriched.geometry?.length) {
         mapRef.current?.fitRoute(enriched.geometry);
       }
 
@@ -564,6 +836,7 @@ export default function MapScreen() {
       routeOptions,
       originCoordinates,
       destinationCoordinates,
+      location,
       mapStops,
       setSelectedRouteIndex,
       setActiveRoute,
@@ -571,8 +844,205 @@ export default function MapScreen() {
       setBoardingStop,
       startNavigation,
       fetchRouteGeometry,
+      enterWalkStreetView,
       hapticFeedback,
     ]
+  );
+
+  const runChatTrip = useCallback(
+    async (trip: ChatTripRequest) => {
+      const seq = ++planSeqRef.current;
+      prevModesKeyRef.current = modesKey;
+      setSelectedStops([]);
+      setIsPlanningRoute(true);
+      setRouteSearchSettled(false);
+      setRoutePathsById({});
+      setEnrichedRoutesById({});
+      setSelectedLine(null);
+      setLineDetail(null);
+      stopNavigation();
+      setActiveRoute(null);
+      setRouteOptions([]);
+
+      setOriginCoordinates(trip.origin);
+      setDestinationCoordinates(trip.destination);
+      setDestinationLabel(trip.destinationLabel);
+
+      try {
+        const routes = await routingService.planRoutes(
+          trip.origin,
+          trip.destination,
+          3,
+          trip.departureTime,
+          enabledTransportModes
+        );
+
+        if (seq !== planSeqRef.current) return;
+
+        if (!routes.length) {
+          setIsPlanningRoute(false);
+          setRouteSearchSettled(true);
+          setChatState((prev) => chatPhaseAfterRoute(prev, t('chat.noRoute'), false, t));
+          return;
+        }
+
+        applyPlannedRoutes(routes, seq);
+
+        const best = routes[0];
+        const enriched = await fetchRouteGeometry(best, trip.origin, trip.destination, {
+          fit: false,
+        });
+        if (seq !== planSeqRef.current) return;
+
+        setSelectedRouteIndex(0);
+        setActiveRoute(enriched);
+        const stops = await collectRouteStops(enriched, mapStops);
+        setRouteStops(stops);
+        setBoardingStop(findBoardingStop(enriched, stops));
+
+        const steps = buildNavigationSteps(enriched, trip.origin, trip.destination, stops);
+        startNavigation(steps);
+        lastGuidedStepRef.current = -1;
+
+        const departure = enriched.departureTime.toLocaleTimeString('fr-FR', {
+          hour: '2-digit',
+          minute: '2-digit',
+        });
+        const arrival = enriched.arrivalTime.toLocaleTimeString('fr-FR', {
+          hour: '2-digit',
+          minute: '2-digit',
+        });
+
+        const summary = t('chat.routeSummary', {
+          duration: enriched.totalDurationMinutes,
+          walk: enriched.walkingMinutes,
+          departure,
+          arrival,
+        });
+
+        setChatState((prev) => {
+          const withSummary = chatPhaseAfterRoute(prev, summary, true, t);
+          chatStateRef.current = withSummary;
+          return withSummary;
+        });
+
+        const firstStep = steps[0];
+        if (firstStep?.kind === 'walk') {
+          enterWalkStreetView(firstStep, trip.origin, null);
+        } else if (firstStep?.pathCoordinates?.length) {
+          mapRef.current?.fitRoute(firstStep.pathCoordinates);
+        } else if (enriched.geometry?.length) {
+          mapRef.current?.fitRoute(enriched.geometry);
+        }
+        if (hapticFeedback) {
+          void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        }
+      } catch {
+        if (seq === planSeqRef.current) {
+          setIsPlanningRoute(false);
+          setRouteSearchSettled(true);
+          setChatState((prev) => chatPhaseAfterRoute(prev, t('chat.noRoute'), false, t));
+        }
+      }
+    },
+    [
+      modesKey,
+      enabledTransportModes,
+      applyPlannedRoutes,
+      fetchRouteGeometry,
+      enterWalkStreetView,
+      mapStops,
+      setSelectedStops,
+      setOriginCoordinates,
+      setDestinationCoordinates,
+      setDestinationLabel,
+      stopNavigation,
+      setActiveRoute,
+      setRouteOptions,
+      setSelectedRouteIndex,
+      setRouteStops,
+      setBoardingStop,
+      startNavigation,
+      hapticFeedback,
+      t,
+    ]
+  );
+
+  const chatCtx = useMemo(
+    () => ({
+      userLocation: location,
+      mapStops,
+      t: (key: string, opts?: Record<string, string | number>) => t(key, opts),
+      resolveUserLocation: refreshLocation,
+    }),
+    [location, mapStops, t, refreshLocation]
+  );
+
+  const onChatSend = useCallback(
+    async (text: string) => {
+      if (chatBusyRef.current) return;
+      chatBusyRef.current = true;
+      try {
+        const result = await handleChatUserText(chatStateRef.current, text, chatCtx);
+        setChatState(result.state);
+        chatStateRef.current = result.state;
+        if (result.tripRequest) {
+          await runChatTrip(result.tripRequest);
+        }
+      } finally {
+        chatBusyRef.current = false;
+      }
+    },
+    [chatCtx, runChatTrip]
+  );
+
+  const onChatQuickReply = useCallback(
+    async (id: string) => {
+      if (chatBusyRef.current) return;
+      chatBusyRef.current = true;
+      try {
+        const result = await handleChatQuickReply(chatStateRef.current, id, chatCtx);
+        setChatState(result.state);
+        chatStateRef.current = result.state;
+        if (result.tripRequest) {
+          await runChatTrip(result.tripRequest);
+        }
+      } finally {
+        chatBusyRef.current = false;
+      }
+    },
+    [chatCtx, runChatTrip]
+  );
+
+  const onChatPlaceSelect = useCallback(
+    (place: SearchSuggestion) => {
+      const result = handleChatPlaceSelect(chatStateRef.current, place, chatCtx);
+      setChatState(result.state);
+      chatStateRef.current = result.state;
+    },
+    [chatCtx]
+  );
+
+  const handleInteractionModeChange = useCallback(
+    (mode: MapInteractionMode) => {
+      setInteractionMode(mode);
+      if (mode === 'chat') {
+        setSelectedStops([]);
+        setLayersSheetOpen(false);
+        setChatState((prev) => {
+          const stillAtStart =
+            prev.phase === 'awaiting_destination' &&
+            !prev.destination &&
+            prev.messages.length <= 2 &&
+            prev.messages.every((m) => m.role === 'assistant');
+          if (stillAtStart || prev.messages.length === 0) {
+            return createInitialChatState((key) => t(key));
+          }
+          return prev;
+        });
+      }
+    },
+    [setSelectedStops, t]
   );
 
   const resolveDestination = useCallback(
@@ -644,6 +1114,15 @@ export default function MapScreen() {
       applyPlannedRoutes,
     ]
   );
+
+  useEffect(() => {
+    if (selectedStops.length === 0) return;
+    const next = selectedStops.filter((stop) =>
+      stopMatchesEnabledModes(stop, enabledTransportModes)
+    );
+    if (next.length === selectedStops.length) return;
+    setSelectedStops(next);
+  }, [enabledTransportModes, selectedStops, setSelectedStops]);
 
   useEffect(() => {
     if (!destinationCoordinates) {
@@ -797,23 +1276,54 @@ export default function MapScreen() {
     [resolveDestination]
   );
 
-  const handleCloseRouteOptions = useCallback(() => {
+  const handleAbortItinerary = useCallback(() => {
+    planSeqRef.current += 1;
     routePathSeq.current += 1;
+    searchSeq.current += 1;
     geometryInFlightRef.current.clear();
     setRoutePathsById({});
     setEnrichedRoutesById({});
     setRouteSearchSettled(false);
+    setIsPlanningRoute(false);
+    setIsSearching(false);
+    setSearchSuggestions([]);
+    setSearchQuery('');
+    setSelectedStops([]);
+    setSelectedLine(null);
+    setLineDetail(null);
     clearRouteNavigation();
-  }, [clearRouteNavigation]);
+    const homeRegion = location
+      ? { ...location, latitudeDelta: 0.025, longitudeDelta: 0.025 }
+      : defaultMapRegion();
+    setMapRegion(homeRegion);
+    mapRef.current?.resetToInitialView(location);
+  }, [
+    clearRouteNavigation,
+    location,
+    setSearchQuery,
+    setSearchSuggestions,
+    setIsSearching,
+    setSelectedStops,
+  ]);
+
+  const handleAbortChatItinerary = useCallback(() => {
+    handleAbortItinerary();
+    const next = createInitialChatState((key) => t(key));
+    setChatState(next);
+    chatStateRef.current = next;
+    chatBusyRef.current = false;
+    if (hapticFeedback) {
+      void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    }
+  }, [handleAbortItinerary, t, hapticFeedback]);
+
+  const handleCloseRouteOptions = useCallback(() => {
+    handleAbortItinerary();
+  }, [handleAbortItinerary]);
 
   const handleDismissNoRoute = useCallback(() => {
-    routePathSeq.current += 1;
-    geometryInFlightRef.current.clear();
-    setRoutePathsById({});
-    setEnrichedRoutesById({});
-    setRouteSearchSettled(false);
-    clearRouteNavigation();
-  }, [clearRouteNavigation]);
+    handleAbortItinerary();
+  }, [handleAbortItinerary]);
 
   const handleRecenter = useCallback(async () => {
     if (hapticFeedback) Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
@@ -821,48 +1331,224 @@ export default function MapScreen() {
     if (coords) mapRef.current?.recenter(coords);
   }, [refreshLocation, location, hapticFeedback]);
 
-  const showRouteOptions = routeOptions.length > 0 && !navigationActive;
+  const chatMode = interactionMode === 'chat';
+
+  const mapNetworkLineShapes = useMemo(() => {
+    if (chatMode || itineraryVisible) return [];
+    return networkLineShapes
+      .filter((line) => enabledTransportModes.includes(line.mode))
+      .map((line) => ({
+        id: line.segmentId ?? line.id,
+        routeId: line.id,
+        color: line.color,
+        coordinates: line.coordinates,
+        highlighted: selectedLine?.id === line.id,
+      }));
+  }, [
+    chatMode,
+    itineraryVisible,
+    networkLineShapes,
+    enabledTransportModes,
+    selectedLine?.id,
+  ]);
+
+  const placeProposals = useMemo((): SearchSuggestion[] => {
+    if (chatMode) {
+      return chatState.pendingSuggestions ?? [];
+    }
+    if (destinationCoordinates) return [];
+    return searchSuggestions;
+  }, [chatMode, chatState.pendingSuggestions, destinationCoordinates, searchSuggestions]);
+
+  const [focusedProposalIndex, setFocusedProposalIndex] = useState(0);
+
+  const placeProposalKey = useMemo(
+    () =>
+      placeProposals
+        .map(
+          (p) =>
+            `${p.coordinates.latitude.toFixed(5)},${p.coordinates.longitude.toFixed(5)}`
+        )
+        .join('|'),
+    [placeProposals]
+  );
+
+  useEffect(() => {
+    setFocusedProposalIndex(0);
+  }, [placeProposalKey]);
+
+  useEffect(() => {
+    if (placeProposals.length === 0) return;
+    const index = Math.min(focusedProposalIndex, placeProposals.length - 1);
+    const place = placeProposals[index];
+    if (!place) return;
+    mapRef.current?.recenter(place.coordinates);
+  }, [placeProposals, focusedProposalIndex]);
+
+  const placeMarkers = useMemo(
+    () =>
+      placeProposals.map((place, index) => {
+        const parts = getPlaceProposalParts(place);
+        return {
+          number: index + 1,
+          coordinates: place.coordinates,
+          name: parts.name,
+          streetLine: parts.streetLine,
+          city: parts.city,
+          quarter: parts.quarter,
+          selectHint: t('map.chooseThisDestination'),
+        };
+      }),
+    [placeProposals, t]
+  );
+
+  const handlePlaceMarkerPress = useCallback(
+    (number: number) => {
+      const place = placeProposals[number - 1];
+      if (!place) return;
+      if (hapticFeedback) {
+        void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      }
+      if (chatMode) {
+        onChatPlaceSelect(place);
+      } else {
+        handleSuggestionSelect(place);
+      }
+    },
+    [placeProposals, chatMode, onChatPlaceSelect, handleSuggestionSelect, hapticFeedback]
+  );
+
+  const handlePrevPlaceProposal = useCallback(() => {
+    if (placeProposals.length < 2) return;
+    if (hapticFeedback) {
+      void Haptics.selectionAsync();
+    }
+    setFocusedProposalIndex((i) => (i - 1 + placeProposals.length) % placeProposals.length);
+  }, [placeProposals.length, hapticFeedback]);
+
+  const handleNextPlaceProposal = useCallback(() => {
+    if (placeProposals.length < 2) return;
+    if (hapticFeedback) {
+      void Haptics.selectionAsync();
+    }
+    setFocusedProposalIndex((i) => (i + 1) % placeProposals.length);
+  }, [placeProposals.length, hapticFeedback]);
+
+  useEffect(() => {
+    if (!chatMode || navigationActive || isPlanningRoute) return;
+    if (chatState.pendingSuggestions && chatState.pendingSuggestions.length > 0) {
+      return;
+    }
+
+    if (chatState.destination) {
+      setDestinationCoordinates(chatState.destination);
+      setDestinationLabel(chatState.destinationLabel ?? null);
+      if (chatState.origin) {
+        setOriginCoordinates(chatState.origin);
+        mapRef.current?.fitRoute([chatState.origin, chatState.destination]);
+      } else {
+        mapRef.current?.recenter(chatState.destination);
+      }
+    }
+  }, [
+    chatMode,
+    navigationActive,
+    isPlanningRoute,
+    chatState.destination,
+    chatState.destinationLabel,
+    chatState.origin,
+    chatState.pendingSuggestions,
+    setDestinationCoordinates,
+    setDestinationLabel,
+    setOriginCoordinates,
+  ]);
+
+  const showChatCloseItinerary =
+    chatMode &&
+    (navigationActive ||
+      isPlanningRoute ||
+      routeOptions.length > 0 ||
+      !!destinationCoordinates ||
+      chatState.phase === 'planning' ||
+      chatState.phase === 'navigating' ||
+      chatState.phase === 'done');
+  const showRouteOptions = routeOptions.length > 0 && !navigationActive && !chatMode;
   const showNoRouteFound =
+    !chatMode &&
     routeSearchSettled &&
     !!destinationCoordinates &&
     !isPlanningRoute &&
     routeOptions.length === 0 &&
     !navigationActive;
-  const bottomStackHeight = navigationActive
-    ? 260
-    : showRouteOptions || isPlanningRoute || showNoRouteFound
-      ? 340
-      : 72;
-  const showSearchSuggestions = !destinationCoordinates && searchSuggestions.length > 0;
-  const floatingControlsBottom = insets.bottom + bottomStackHeight + spacing.md;
+  const bottomStackHeight = chatMode
+    ? navigationActive
+      ? 300
+      : 490
+    : navigationActive
+      ? 400
+      : showRouteOptions || isPlanningRoute || showNoRouteFound
+        ? 340
+        : 72;
+  const floatingControlsBottom =
+    insets.bottom +
+    bottomStackHeight +
+    spacing.md +
+    (!chatMode && navigationActive ? spacing.xl : 0);
   const mapBottomClearance = bottomStackHeight + insets.bottom + spacing.lg;
   const stopInfoContentTop = insets.top + 56 + spacing.sm;
   const vignette = useMapVignetteLayout(mapBottomClearance);
   const { weather: mapWeather, loading: mapWeatherLoading } = useMapWeather(mapRegion);
+  const mapInteractive =
+    !chatMode || placeProposals.length > 0 || navigationActive;
+  const proposalArrowTop = useMemo(
+    () => insets.top + (Dimensions.get('window').height - mapBottomClearance - insets.top) * 0.42,
+    [insets.top, mapBottomClearance]
+  );
 
   return (
     <View style={styles.container}>
-      <TransitMap
-        ref={mapRef}
-        userLocation={location}
-        origin={originCoordinates}
-        destination={destinationCoordinates}
-        routeCoordinates={routeMapSegments.length > 0 ? undefined : activeMapPath}
-        routeSegments={routeMapSegments.length > 0 ? routeMapSegments : undefined}
-        walkCoordinates={undefined}
-        boardingStop={navigationActive ? boardingStop : null}
-        lineCoordinates={lineCoordinates}
-        lineColor={selectedLine?.color}
-        stopClusters={stopClusters}
-        pois={showPois ? mapPois : []}
-        clearRadius={vignette.clearRadius}
-        vignette={vignette}
-        selectedStopIds={selectedStopIds}
-        onStopClusterPress={handleStopClusterPress}
-        onRegionChangeComplete={handleMapRegionChange}
-      />
+      <View style={styles.mapLayer} pointerEvents={mapInteractive ? 'auto' : 'none'}>
+        <TransitMap
+          ref={mapRef}
+          userLocation={
+            walkNavigationActive
+              ? location ?? currentNavigationStep?.from ?? null
+              : location
+          }
+          userHeading={walkNavigationActive ? userHeading : null}
+          showNavigationPuck={!!walkNavigationActive}
+          origin={originCoordinates}
+          destination={destinationCoordinates}
+          routeCoordinates={routeMapSegments.length > 0 ? undefined : activeMapPath}
+          routeSegments={routeMapSegments.length > 0 ? routeMapSegments : undefined}
+          walkCoordinates={undefined}
+          activeStepCoordinates={activeStepPath}
+          progressCoordinate={routeProgressCoordinate}
+          stepTarget={
+            navigationActive && currentNavigationStep && currentNavigationStep.kind !== 'arrive'
+              ? currentNavigationStep.to
+              : null
+          }
+          placeMarkers={placeMarkers}
+          focusedPlaceNumber={
+            placeProposals.length > 0 ? focusedProposalIndex + 1 : null
+          }
+          onPlaceMarkerPress={handlePlaceMarkerPress}
+          boardingStop={navigationActive ? boardingStop : null}
+          lineCoordinates={lineCoordinates}
+          lineColor={selectedLine?.color}
+          networkLineShapes={mapNetworkLineShapes}
+          stopClusters={chatMode && !itineraryVisible ? [] : stopClusters}
+          pois={chatMode || !showPois ? [] : mapPois}
+          clearRadius={vignette.clearRadius}
+          vignette={vignette}
+          selectedStopIds={selectedStopIds}
+          onStopClusterPress={chatMode && !itineraryVisible ? undefined : handleStopClusterPress}
+          onRegionChangeComplete={handleMapRegionChange}
+        />
+      </View>
 
-      {selectedStops.length > 0 ? (
+      {!chatMode && selectedStops.length > 0 ? (
         <StopInfoCard
           stops={selectedStops}
           departuresByStop={departuresByStop}
@@ -870,6 +1556,7 @@ export default function MapScreen() {
           top={0}
           contentTop={stopInfoContentTop}
           userLocation={location}
+          allowedModes={enabledTransportModes}
           onClose={handleCloseStopInfo}
           onNavigate={handleNavigateToStop}
         />
@@ -877,8 +1564,8 @@ export default function MapScreen() {
 
       <AppMenuButton
         top={insets.top + spacing.sm}
-        onRecenter={handleRecenter}
-        onOpenLayers={() => setLayersSheetOpen(true)}
+        onRecenter={chatMode ? undefined : handleRecenter}
+        onOpenLayers={chatMode ? undefined : () => setLayersSheetOpen(true)}
         layersActive={layersActive}
       />
 
@@ -889,14 +1576,32 @@ export default function MapScreen() {
         loading={mapWeatherLoading}
       />
 
-      <MapFloatingControls
-        bottom={floatingControlsBottom}
-        onZoomIn={() => mapRef.current?.zoomIn()}
-        onZoomOut={() => mapRef.current?.zoomOut()}
+      <MapModeToggle
+        mode={interactionMode}
+        onChange={handleInteractionModeChange}
+        top={insets.top + spacing.sm}
+        left={spacing.md + MAP_WEATHER_WIDGET_SIZE + spacing.sm}
       />
 
+      {placeProposals.length > 1 ? (
+        <PlaceProposalControls
+          total={placeProposals.length}
+          arrowTop={proposalArrowTop}
+          onPrev={handlePrevPlaceProposal}
+          onNext={handleNextPlaceProposal}
+        />
+      ) : null}
+
+      {!chatMode ? (
+        <MapFloatingControls
+          bottom={floatingControlsBottom}
+          onZoomIn={() => mapRef.current?.zoomIn()}
+          onZoomOut={() => mapRef.current?.zoomOut()}
+        />
+      ) : null}
+
       <MapLayersSheet
-        visible={layersSheetOpen}
+        visible={layersSheetOpen && !chatMode}
         top={insets.top + 48 + spacing.sm}
         mapRegion={mapRegion}
         selectedLineId={selectedLine?.id ?? null}
@@ -917,44 +1622,72 @@ export default function MapScreen() {
           style={[styles.bottomContent, { paddingBottom: insets.bottom + spacing.sm }]}
           pointerEvents="box-none"
         >
-          {navigationActive && currentNavigationStep ? (
-            <InAppNavigationCard
-              step={currentNavigationStep}
-              stepIndex={navigationStepIndex}
-              totalSteps={navigationSteps.length}
-              userLocation={location}
-              onStop={() => {
-                stopNavigation();
-                if (hapticFeedback) Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-              }}
-            />
-          ) : null}
+          {chatMode ? (
+            navigationActive && currentNavigationStep ? (
+              <InAppNavigationCard
+                step={currentNavigationStep}
+                steps={navigationSteps}
+                stepIndex={navigationStepIndex}
+                totalSteps={navigationSteps.length}
+                userLocation={location}
+                onStop={() => {
+                  handleAbortChatItinerary();
+                  if (hapticFeedback) {
+                    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                  }
+                }}
+              />
+            ) : (
+              <ChatModePanel
+                state={chatState}
+                onSend={onChatSend}
+                onQuickReply={onChatQuickReply}
+                showCloseItinerary={showChatCloseItinerary}
+                onCloseItinerary={handleAbortChatItinerary}
+                bottomInset={0}
+              />
+            )
+          ) : (
+            <>
+              {navigationActive && currentNavigationStep ? (
+                <InAppNavigationCard
+                  step={currentNavigationStep}
+                  steps={navigationSteps}
+                  stepIndex={navigationStepIndex}
+                  totalSteps={navigationSteps.length}
+                  userLocation={location}
+                  onStop={() => {
+                    handleAbortItinerary();
+                    if (hapticFeedback) Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                  }}
+                />
+              ) : null}
 
-          {showRouteOptions && destinationLabel ? (
-            <RouteOptionsSheet
-              routes={routeOptions}
-              destinationLabel={destinationLabel}
-              selectedIndex={previewRouteIndex}
-              onPreview={handlePreviewRoute}
-              onStart={handleStartRoute}
-              onClose={handleCloseRouteOptions}
-            />
-          ) : showNoRouteFound ? (
-            <NoRouteFoundCard
-              destinationLabel={destinationLabel}
-              onClose={handleDismissNoRoute}
-            />
-          ) : isPlanningRoute ? (
-            <PlanningRouteCard />
-          ) : null}
+              {showRouteOptions && destinationLabel ? (
+                <RouteOptionsSheet
+                  routes={routeOptions}
+                  destinationLabel={destinationLabel}
+                  selectedIndex={previewRouteIndex}
+                  onPreview={handlePreviewRoute}
+                  onStart={handleStartRoute}
+                  onClose={handleCloseRouteOptions}
+                />
+              ) : showNoRouteFound ? (
+                <NoRouteFoundCard
+                  destinationLabel={destinationLabel}
+                  onClose={handleDismissNoRoute}
+                />
+              ) : isPlanningRoute ? (
+                <PlanningRouteCard />
+              ) : null}
 
-          <SearchBar
-            value={searchQuery}
-            onChangeText={handleChangeText}
-            isLoading={isSearching || isPlanningRoute}
-            suggestions={showSearchSuggestions ? searchSuggestions : []}
-            onSelectSuggestion={handleSuggestionSelect}
-          />
+              <SearchBar
+                value={searchQuery}
+                onChangeText={handleChangeText}
+                isLoading={isSearching || isPlanningRoute}
+              />
+            </>
+          )}
         </View>
       </KeyboardAvoidingView>
     </View>
@@ -963,6 +1696,7 @@ export default function MapScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#0D1117' },
+  mapLayer: { ...StyleSheet.absoluteFill },
   bottomSheet: {
     ...StyleSheet.absoluteFill,
     justifyContent: 'flex-end',

@@ -16,6 +16,11 @@ export interface SearchSuggestion {
   coordinates: Coordinates;
   source: 'known' | 'stop' | 'geocode';
   category?: PlaceCategory;
+  /** « 12 rue de la Loge » */
+  streetLine?: string;
+  city?: string;
+  /** Quartier */
+  quarter?: string;
 }
 
 export interface Stop {

@@ -60,4 +60,5 @@ export const LINE_COLORS: Record<string, string> = {
   '3': '#5B8DEF',
   '4': '#F5A623',
   '5': '#9B6DD7',
+  A: '#0D9B8A',
 };

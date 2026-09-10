@@ -15,7 +15,7 @@ export function NoRouteFoundCard({ destinationLabel, onClose }: NoRouteFoundCard
   return (
     <View style={styles.wrapper}>
       <View style={[mapGlassSurfaceStyles.panel, styles.sheet]}>
-        <MapGlassBackground />
+        <MapGlassBackground variant="dark" />
 
         <View style={styles.header}>
           <View style={styles.headerMain}>
@@ -37,7 +37,7 @@ export function NoRouteFoundCard({ destinationLabel, onClose }: NoRouteFoundCard
           accessibilityRole="button"
           accessibilityLabel={t('common.close')}
         >
-          <MapGlassBackground />
+          <MapGlassBackground variant="dark" />
           <Text style={styles.actionButtonText}>{t('common.close')}</Text>
         </Pressable>
       </View>

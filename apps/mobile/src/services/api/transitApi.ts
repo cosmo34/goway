@@ -1,5 +1,6 @@
 import { api } from '../api/client';
 import type { Departure, Stop, Route, PointOfInterest, SearchScope, SearchSuggestion, TransitLine, TransitLineDetail, Coordinates } from '../../stores/transitStore';
+import { alignWalkingLegsToMapStreets } from '../routing/walkingGeometry';
 
 export async function searchStopsApi(query: string): Promise<Stop[]> {
   return api.get<Stop[]>(`/api/stops/search?q=${encodeURIComponent(query)}`);
@@ -24,7 +25,7 @@ function parseDepartures(
   }));
 }
 
-export async function getDeparturesApi(stopId: string): Promise<Departure[]> {
+export async function getDeparturesApi(stopId: string, count = 5): Promise<Departure[]> {
   const raw = await api.get<
     Array<{
       lineId: string;
@@ -36,7 +37,7 @@ export async function getDeparturesApi(stopId: string): Promise<Departure[]> {
       isRealtime: boolean;
       mode: 'tram' | 'bus' | 'tram_bus';
     }>
-  >(`/api/stops/${stopId}/departures`);
+  >(`/api/stops/${stopId}/departures?count=${count}`);
 
   return parseDepartures(raw);
 }
@@ -66,13 +67,13 @@ export async function buildRouteGeometryApi(
     destLon: destination.longitude,
   });
 
-  return {
+  return alignWalkingLegsToMapStreets({
     ...raw,
     departureTime: new Date(raw.departureTime),
     arrivalTime: new Date(raw.arrivalTime),
     geometry: raw.geometry ?? [],
     legs: raw.legs.map((leg) => ({ ...leg, geometry: leg.geometry ?? [] })),
-  };
+  });
 }
 
 export async function planRoutesApi(
@@ -81,7 +82,8 @@ export async function planRoutesApi(
   destLat: number,
   destLon: number,
   count = 3,
-  allowedModes?: Array<'tram' | 'bus' | 'tram_bus'>
+  allowedModes?: Array<'tram' | 'bus' | 'tram_bus'>,
+  departureTime?: Date
 ): Promise<Route[]> {
   const raw = await api.post<{
     routes: Array<{
@@ -94,7 +96,15 @@ export async function planRoutesApi(
       geometry?: Route['geometry'];
       itineraryStopIds?: string[];
     }>;
-  }>('/api/routes/plan', { originLat, originLon, destLat, destLon, count, allowedModes });
+  }>('/api/routes/plan', {
+    originLat,
+    originLon,
+    destLat,
+    destLon,
+    count,
+    allowedModes,
+    departureTime: departureTime?.toISOString(),
+  });
 
   return raw.routes.map((route) => ({
     ...route,
@@ -268,6 +278,28 @@ export async function listLinesApi(bbox?: {
     ? `?north=${bbox.north}&south=${bbox.south}&east=${bbox.east}&west=${bbox.west}`
     : '';
   return api.get<TransitLine[]>(`/api/lines${params}`);
+}
+
+export interface LineShape {
+  id: string;
+  segmentId?: string;
+  shortName: string;
+  longName: string;
+  color: string;
+  mode: 'tram' | 'bus' | 'tram_bus';
+  coordinates: Array<{ latitude: number; longitude: number }>;
+}
+
+export async function listLineShapesApi(bbox?: {
+  north: number;
+  south: number;
+  east: number;
+  west: number;
+}): Promise<LineShape[]> {
+  const params = bbox
+    ? `?north=${bbox.north}&south=${bbox.south}&east=${bbox.east}&west=${bbox.west}`
+    : '';
+  return api.get<LineShape[]>(`/api/lines/shapes${params}`);
 }
 
 export async function getLineDetailApi(

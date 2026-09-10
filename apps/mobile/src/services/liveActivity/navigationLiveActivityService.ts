@@ -1,11 +1,12 @@
 import type { NavigationStep } from '../routing/navigationSteps';
 import { liveActivityService, type LiveActivityData } from './liveActivityService';
 import { stopLiveActivityService } from './stopLiveActivityService';
+import i18n from '../../i18n';
 
 function stepLineName(step: NavigationStep): string {
-  if (step.kind === 'transit') return step.lineName ?? 'Ligne';
-  if (step.kind === 'walk') return 'À pied';
-  return 'Arrivée';
+  if (step.kind === 'transit') return step.lineName ?? i18n.t('common.line');
+  if (step.kind === 'walk') return i18n.t('common.walk');
+  return i18n.t('common.arrival');
 }
 
 function stepLineColor(step: NavigationStep): string {

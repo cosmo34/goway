@@ -3,7 +3,7 @@ import {
   gtfsTimeToDate,
   getServiceDate,
   haversineMeters,
-  routeTypeToMode,
+  routeToMode,
   type GtfsStop,
 } from './gtfsLoader.js';
 import { getTripDelay } from './gtfsRtService.js';
@@ -149,11 +149,13 @@ export function getStopById(stopId: string): ApiStop | null {
   return stopToApi(stop, getStopModes(stopId));
 }
 
-export function getDepartures(stopId: string, count = 10): ApiDeparture[] {
+export function getDepartures(stopId: string, count = 5): ApiDeparture[] {
   const gtfs = getGtfs();
   const now = new Date();
   const serviceDate = getServiceDate();
   const stopTimes = gtfs.stopTimesByStop.get(stopId) ?? [];
+  const windowMs = 3 * 60 * 60_000;
+  const perDirection = Math.max(1, Math.min(count, 12));
   const departures: ApiDeparture[] = [];
 
   for (const st of stopTimes) {
@@ -171,6 +173,8 @@ export function getDepartures(stopId: string, count = 10): ApiDeparture[] {
     const realtime = new Date(scheduled.getTime() + delaySeconds * 1000);
     const hasRt = delay !== undefined;
 
+    if (realtime.getTime() - now.getTime() > windowMs) continue;
+
     const shortName = route.route_short_name;
     departures.push({
       lineId: route.route_id,
@@ -182,23 +186,35 @@ export function getDepartures(stopId: string, count = 10): ApiDeparture[] {
       scheduledTime: scheduled.toISOString(),
       realtimeTime: hasRt ? realtime.toISOString() : scheduled.toISOString(),
       isRealtime: hasRt,
-      mode: routeTypeToMode(route.route_type),
+      mode: routeToMode(route),
       tripId: st.trip_id,
       headsign: trip.trip_headsign,
     });
   }
 
-  return departures
-    .filter((d) => {
-      const t = new Date(d.realtimeTime ?? d.scheduledTime).getTime();
-      return t - now.getTime() <= 3 * 60 * 60_000;
-    })
+  departures.sort(
+    (a, b) =>
+      new Date(a.realtimeTime ?? a.scheduledTime).getTime() -
+      new Date(b.realtimeTime ?? b.scheduledTime).getTime()
+  );
+
+  // Une ligne fréquente ne doit pas écraser les autres : N prochains par ligne+direction.
+  const byLineDirection = new Map<string, ApiDeparture[]>();
+  for (const departure of departures) {
+    const key = `${departure.lineId}:${departure.direction}`;
+    const bucket = byLineDirection.get(key) ?? [];
+    if (bucket.length >= perDirection) continue;
+    bucket.push(departure);
+    byLineDirection.set(key, bucket);
+  }
+
+  return Array.from(byLineDirection.values())
+    .flat()
     .sort(
       (a, b) =>
         new Date(a.realtimeTime ?? a.scheduledTime).getTime() -
         new Date(b.realtimeTime ?? b.scheduledTime).getTime()
-    )
-    .slice(0, count);
+    );
 }
 
 function getStopModes(stopId: string): string[] {
@@ -211,7 +227,7 @@ function getStopModes(stopId: string): string[] {
     if (!trip) continue;
     const route = gtfs.routes.get(trip.route_id);
     if (!route) continue;
-    modes.add(routeTypeToMode(route.route_type));
+    modes.add(routeToMode(route));
   }
 
   return Array.from(modes);
