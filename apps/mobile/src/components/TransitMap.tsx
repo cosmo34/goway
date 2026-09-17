@@ -56,8 +56,12 @@ export interface TransitMapHandle {
   fitRoute: (coords: Coordinates[]) => void;
   zoomIn: () => void;
   zoomOut: () => void;
-  /** Suit l’utilisateur en mode guidage à pied (caméra + cap). */
-  followUser: (coords: Coordinates, heading?: number | null) => void;
+  /** Suit l’utilisateur en mode guidage (caméra centrée + cap). */
+  followUser: (
+    coords: Coordinates,
+    heading?: number | null,
+    options?: { altitude?: number; zoom?: number }
+  ) => void;
   /** Revient à la vue d’accueil (plate), comme à l’ouverture de l’app. */
   resetToInitialView: (coords?: Coordinates | null) => void;
 }
@@ -117,6 +121,8 @@ interface TransitMapProps {
   selectedStopIds?: string[];
   onStopClusterPress?: (stops: Stop[]) => void;
   onRegionChangeComplete?: (region: Region) => void;
+  /** Décale le centre logique de la carte (ex. feuille d’étape en bas). */
+  mapPadding?: { top: number; right: number; bottom: number; left: number };
   vignette?: {
     width: number;
     height: number;
@@ -297,6 +303,7 @@ export const TransitMap = forwardRef<TransitMapHandle, TransitMapProps>(function
     selectedStopIds = [],
     onStopClusterPress,
     onRegionChangeComplete,
+    mapPadding,
     vignette,
   },
   ref
@@ -393,25 +400,36 @@ export const TransitMap = forwardRef<TransitMapHandle, TransitMapProps>(function
   const zoomIn = useCallback(() => zoomBy(ZOOM_FACTOR), [zoomBy]);
   const zoomOut = useCallback(() => zoomBy(1 / ZOOM_FACTOR), [zoomBy]);
 
-  const followUser = useCallback((coords: Coordinates, heading?: number | null) => {
-    regionRef.current = {
-      ...coords,
-      latitudeDelta: WALK_FOLLOW_DELTA,
-      longitudeDelta: WALK_FOLLOW_DELTA,
-    };
-    const resolvedHeading = heading != null && Number.isFinite(heading) ? heading : 0;
-    cameraHeadingRef.current = resolvedHeading;
-    mapRef.current?.animateCamera(
-      {
-        center: toCoord(coords),
-        heading: resolvedHeading,
-        pitch: 0,
-        altitude: WALK_FOLLOW_ALTITUDE,
-        zoom: WALK_FOLLOW_ZOOM,
-      },
-      { duration: 550 }
-    );
-  }, []);
+  const followUser = useCallback(
+    (
+      coords: Coordinates,
+      heading?: number | null,
+      options?: { altitude?: number; zoom?: number }
+    ) => {
+      const altitude = options?.altitude ?? WALK_FOLLOW_ALTITUDE;
+      const zoom = options?.zoom ?? WALK_FOLLOW_ZOOM;
+      const delta =
+        altitude <= WALK_FOLLOW_ALTITUDE * 1.5 ? WALK_FOLLOW_DELTA : Math.max(0.0025, altitude / 80000);
+      regionRef.current = {
+        ...coords,
+        latitudeDelta: delta,
+        longitudeDelta: delta,
+      };
+      const resolvedHeading = heading != null && Number.isFinite(heading) ? heading : 0;
+      cameraHeadingRef.current = resolvedHeading;
+      mapRef.current?.animateCamera(
+        {
+          center: toCoord(coords),
+          heading: resolvedHeading,
+          pitch: 0,
+          altitude,
+          zoom,
+        },
+        { duration: 550 }
+      );
+    },
+    []
+  );
 
   /** Vue plate d’accueil : position user (comme après ouverture) ou Montpellier. */
   const resetToInitialView = useCallback((coords?: Coordinates | null) => {
@@ -490,6 +508,9 @@ export const TransitMap = forwardRef<TransitMapHandle, TransitMapProps>(function
         rotateEnabled={showNavigationPuck}
         scrollEnabled
         zoomEnabled
+        mapPadding={
+          mapPadding ?? { top: 0, right: 0, bottom: 0, left: 0 }
+        }
         onRegionChange={(region: Region) => {
           regionRef.current = region;
         }}

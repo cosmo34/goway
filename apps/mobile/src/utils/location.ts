@@ -23,10 +23,26 @@ export function isInMontpellierServiceArea(lat: number, lon: number): boolean {
   return haversineMeters(center.latitude, center.longitude, lat, lon) <= SERVICE_RADIUS_METERS;
 }
 
-/** Corrige la position simulateur (ex. San Francisco) vers Montpellier */
+/** Defaults simulateur Apple (Bay Area) — à recentrer sur Montpellier. */
+function isLikelySimulatorDefaultLocation(coords: Coordinates): boolean {
+  return (
+    coords.latitude > 36.5 &&
+    coords.latitude < 38.5 &&
+    coords.longitude > -123.2 &&
+    coords.longitude < -121.2
+  );
+}
+
+/**
+ * Conserve la vraie position hors zone TaM (ex. autre ville).
+ * Ne recentre que les positions simulateur SF/Cupertino.
+ */
 export function normalizeUserCoordinates(coords: Coordinates): Coordinates {
   if (isInMontpellierServiceArea(coords.latitude, coords.longitude)) {
     return coords;
   }
-  return { ...MONTPELLIER_BOUNDS.center };
+  if (isLikelySimulatorDefaultLocation(coords)) {
+    return { ...MONTPELLIER_BOUNDS.center };
+  }
+  return coords;
 }

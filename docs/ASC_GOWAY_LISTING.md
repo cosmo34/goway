@@ -1,6 +1,6 @@
 # Fiche App Store Connect — GOWAY
 
-Apple ID : **6806571587** · Bundle : `fr.goway.app` · Version store : **1.0** (publiée) → **1.1** (nouvelle soumission) · Build app : **1.1.0 (2)**
+Apple ID : **6806571587** · Bundle : `fr.goway.app` · Version store : **1.1** (READY_FOR_DISTRIBUTION) → **1.2** (nouvelle soumission) · Build app : **1.2.0 (3)**
 
 ## Rempli via API
 
@@ -23,33 +23,33 @@ Apple ID : **6806571587** · Bundle : `fr.goway.app` · Version store : **1.0** 
 | Infos review | contact@picaza.fr + notes review |
 | Prix | Gratuit |
 
-## Notes de version 1.1 (What's New)
+## Notes de version 1.2 (What's New)
 
 ### FR
 ```
-• Itinéraires plus fiables (bons sens, moins de détours)
-• Marche qui suit les rues ; ligne droite sur les places
-• Guidage navigation amélioré (GPS, étapes)
-• Mode chat et suggestions de lieux
-• Corrections d’arrêts affichés sur l’itinéraire
+• Recherche en langage naturel et assistant conversationnel sur la carte
+• Trajets planifiés enregistrés avec rappel 30 min avant le départ
+• Live Activity pour les trajets planifiés
+• Guidage plus clair : étape en cours uniquement, carte centrée sur votre position
+• Interface carte affinée (bulles, modes, horaires)
 ```
 
 ### EN
 ```
-• More reliable routes (correct direction, fewer detours)
-• Walking paths follow streets; straight lines across plazas
-• Improved in-app navigation guidance
-• Chat mode and place suggestions
-• Fixes for stops shown along your itinerary
+• Natural-language search and conversational assistant on the map
+• Save planned trips with a reminder 30 minutes before departure
+• Live Activity for planned trips
+• Clearer guidance: current step only, map centered on your location
+• Refined map UI (bubbles, modes, departure time)
 ```
 
-## Build & soumission 1.1
+## Build & soumission 1.2
 
 ```bash
 cd apps/mobile
-# Archive / upload locaux via asc (team 8RYST2PZHX)
 asc publish appstore --app 6806571587 \
   --workspace ios/GOWAY.xcworkspace --scheme GOWAY \
-  --version 1.1 --team-id 8RYST2PZHX \
+  --version 1.2 --team-id 8RYST2PZHX \
+  --metadata-dir ../../docs/asc/metadata/version/1.2 \
   --signing-style automatic --wait --submit --confirm
 ```

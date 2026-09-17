@@ -1,0 +1,8 @@
+{
+  "description": "GOWAY te ayuda a moverte por la red TaM (Métropole de Montpellier):\n\n• Horarios de tranvía y bus en tiempo real\n• Itinerarios multimodales (a pie + transporte)\n• Navegación guiada paso a paso\n• Live Activities iOS durante el trayecto\n• Widgets y seguimiento de paradas\n• Búsqueda de destinos y lugares\n• Alertas de tráfico\n• 7 idiomas y opciones de accesibilidad\n\nDatos open data TaM (licencia ODbL). Se requiere conexión a Internet. Pensada principalmente para Montpellier y alrededores.",
+  "keywords": "tranvía,bus,montpellier,tam,horario,ruta,transporte,navegación,tiempo real",
+  "marketingUrl": "https://picaza.fr/",
+  "promotionalText": "Horarios TaM en tiempo real, rutas y navegación guiada para Montpellier.",
+  "supportUrl": "https://picaza.fr/support/goway/",
+  "whatsNew": "• Búsqueda en lenguaje natural y asistente conversacional en el mapa\n• Viajes planificados guardados con aviso 30 min antes\n• Live Activity para viajes planificados\n• Guía más clara: solo el paso actual, mapa centrado en tu posición\n• Interfaz del mapa refinada"
+}

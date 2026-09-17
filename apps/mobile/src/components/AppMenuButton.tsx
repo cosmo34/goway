@@ -25,6 +25,8 @@ interface AppMenuButtonProps {
   onRecenter?: () => void;
   onOpenLayers?: () => void;
   layersActive?: boolean;
+  /** Intégré dans MapTopBar : pas de position absolute. */
+  embedded?: boolean;
 }
 
 type MenuRoute = '/(tabs)' | '/(tabs)/schedules' | '/(tabs)/alerts' | '/(tabs)/settings';
@@ -44,6 +46,7 @@ export function AppMenuButton({
   onRecenter,
   onOpenLayers,
   layersActive,
+  embedded = false,
 }: AppMenuButtonProps) {
   const { t } = useTranslation();
   const { isDark } = useTheme();
@@ -123,12 +126,13 @@ export function AppMenuButton({
 
   return (
     <>
-      <View style={[styles.headerRow, { top }]}>
+      <View style={[embedded ? styles.headerRowEmbedded : styles.headerRow, !embedded && { top }]}>
         {onRecenter ? (
           <MapControlButton
             icon="navigate-outline"
             onPress={onRecenter}
             accessibilityLabel={t('map.myLocation')}
+            compact={embedded}
           />
         ) : null}
         {onOpenLayers ? (
@@ -137,15 +141,16 @@ export function AppMenuButton({
             onPress={onOpenLayers}
             active={layersActive}
             accessibilityLabel="Calques"
+            compact={embedded}
           />
         ) : null}
-        <View style={styles.trigger}>
-          {Platform.OS === 'ios' ? (
+        <View style={[styles.trigger, embedded && styles.triggerEmbedded]}>
+          {!embedded && Platform.OS === 'ios' ? (
             <View style={styles.triggerBlur}>
               <BlurView intensity={32} tint="dark" />
             </View>
           ) : null}
-          <View style={styles.triggerTint} />
+          {!embedded ? <View style={styles.triggerTint} /> : null}
           <Pressable
             onPress={() => setOpen((v) => !v)}
             style={styles.triggerHit}
@@ -157,14 +162,17 @@ export function AppMenuButton({
               radius: TRIGGER_RADIUS,
             }}
           >
-            <Ionicons name={open ? 'close' : 'menu'} size={22} color={mapChromeText.primary} />
+            <Ionicons name={open ? 'close' : 'menu'} size={embedded ? 20 : 22} color={mapChromeText.primary} />
           </Pressable>
         </View>
       </View>
 
       <Modal visible={open} transparent animationType="none" onRequestClose={close}>
         <Pressable style={styles.backdrop} onPress={close} accessibilityLabel={t('common.cancel')}>
-          <View style={[styles.menuList, { top: top + 52 }]} pointerEvents="box-none">
+          <View
+            style={[styles.menuList, { top: embedded ? top + 56 : top + 52 }]}
+            pointerEvents="box-none"
+          >
             {items.map((item, index) => (
               <Animated.View
                 key={item.id}
@@ -206,6 +214,11 @@ function createStyles(colors: ReturnType<typeof useThemeColors>, isDark: boolean
       zIndex: 30,
       elevation: 30,
     },
+    headerRowEmbedded: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+    },
     trigger: {
       width: TRIGGER_SIZE,
       height: TRIGGER_SIZE,
@@ -213,6 +226,12 @@ function createStyles(colors: ReturnType<typeof useThemeColors>, isDark: boolean
       overflow: 'hidden',
       borderWidth: 1,
       borderColor: MAP_CHROME_BORDER,
+    },
+    triggerEmbedded: {
+      width: 36,
+      height: 36,
+      borderRadius: 18,
+      backgroundColor: 'rgba(255,255,255,0.1)',
     },
     triggerBlur: {
       ...StyleSheet.absoluteFill,
@@ -252,9 +271,6 @@ function createStyles(colors: ReturnType<typeof useThemeColors>, isDark: boolean
       color: isDark ? colors.textPrimary : '#000000',
       textAlign: 'right',
       fontWeight: '700',
-      textShadowColor: isDark ? 'transparent' : 'rgba(255, 255, 255, 0.85)',
-      textShadowOffset: { width: 0, height: 0 },
-      textShadowRadius: isDark ? 0 : 4,
     },
     menuLabelActive: {
       color: colors.accent,

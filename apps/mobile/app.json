@@ -2,7 +2,7 @@
   "expo": {
     "name": "GOWAY",
     "slug": "goway",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "scheme": "goway",
@@ -16,7 +16,7 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "fr.goway.app",
-      "buildNumber": "2",
+      "buildNumber": "3",
       "entitlements": {
         "com.apple.security.application-groups": [
           "group.fr.goway.app"

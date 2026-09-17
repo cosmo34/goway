@@ -25,8 +25,17 @@ export function regionCenter(region: Region): Coordinates {
   return { latitude: region.latitude, longitude: region.longitude };
 }
 
+function bboxIntersectsMontpellier(bbox: MapBbox): boolean {
+  const { north, south, east, west } = MONTPELLIER_BOUNDS;
+  return !(bbox.south > north || bbox.north < south || bbox.west > east || bbox.east < west);
+}
+
+/** True si le viewport intersecte la zone TaM (pas seulement le centre). */
 export function isMapRegionInServiceArea(region: Region): boolean {
-  return isInMontpellierServiceArea(region.latitude, region.longitude);
+  if (isInMontpellierServiceArea(region.latitude, region.longitude)) {
+    return true;
+  }
+  return bboxIntersectsMontpellier(regionToBbox(region));
 }
 
 export function defaultMapRegion(): Region {

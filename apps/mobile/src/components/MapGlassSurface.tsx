@@ -4,26 +4,36 @@ import { radius, darkColors } from '../theme';
 import { useTheme } from '../theme/ThemeContext';
 
 /** Verre sombre des contrôles carte (+/−, recentrer) — indépendant du thème clair/sombre. */
-export const MAP_CHROME_TINT = 'rgba(15, 20, 28, 0.75)';
+export const MAP_CHROME_TINT = 'rgba(12, 16, 24, 0.88)';
 export const MAP_CHROME_BORDER = 'rgba(255, 255, 255, 0.12)';
+/** Overlay plus léger pour les menus flottants (horaire, modes). */
+export const MAP_CHROME_SOFT_TINT = 'rgba(15, 20, 28, 0.55)';
 
 interface MapGlassBackgroundProps {
-  /** `mapChrome` = contrôles carte ; `dark` = feuille sombre même en thème clair */
-  variant?: 'theme' | 'mapChrome' | 'dark';
+  /** `mapChrome` = contrôles carte ; `dark` = feuille sombre même en thème clair ; `mapChromeSoft` = popup léger */
+  variant?: 'theme' | 'mapChrome' | 'mapChromeSoft' | 'dark';
 }
 
 export function MapGlassBackground({ variant = 'theme' }: MapGlassBackgroundProps) {
   const { colors, isDark } = useTheme();
 
-  if (variant === 'mapChrome') {
+  if (variant === 'mapChrome' || variant === 'mapChromeSoft') {
+    const soft = variant === 'mapChromeSoft';
     return (
       <>
         {Platform.OS === 'ios' ? (
-          <View style={StyleSheet.absoluteFill}>
-            <BlurView intensity={32} tint="dark" />
-          </View>
+          <BlurView
+            intensity={soft ? 22 : 48}
+            tint="dark"
+            style={StyleSheet.absoluteFill}
+          />
         ) : null}
-        <View style={[StyleSheet.absoluteFill, { backgroundColor: MAP_CHROME_TINT }]} />
+        <View
+          style={[
+            StyleSheet.absoluteFill,
+            { backgroundColor: soft ? MAP_CHROME_SOFT_TINT : MAP_CHROME_TINT },
+          ]}
+        />
       </>
     );
   }
@@ -33,9 +43,11 @@ export function MapGlassBackground({ variant = 'theme' }: MapGlassBackgroundProp
   return (
     <>
       {Platform.OS === 'ios' ? (
-        <View style={StyleSheet.absoluteFill}>
-          <BlurView intensity={useDarkGlass ? 28 : 48} tint={useDarkGlass ? 'dark' : 'light'} />
-        </View>
+        <BlurView
+          intensity={useDarkGlass ? 28 : 48}
+          tint={useDarkGlass ? 'dark' : 'light'}
+          style={StyleSheet.absoluteFill}
+        />
       ) : null}
       <View
         style={[
@@ -69,6 +81,18 @@ export const mapGlassSurfaceStyles = StyleSheet.create({
     shadowOpacity: 0.25,
     shadowRadius: 10,
     elevation: 5,
+  },
+  /** Menus flottants (horaire, modes) — plus transparents, coins très arrondis. */
+  mapChromePopup: {
+    borderRadius: 28,
+    overflow: 'hidden',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255, 255, 255, 0.18)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.22,
+    shadowRadius: 18,
+    elevation: 8,
   },
 });
 

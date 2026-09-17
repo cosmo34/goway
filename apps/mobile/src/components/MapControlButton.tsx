@@ -11,6 +11,7 @@ interface MapControlButtonProps {
   onPress: () => void;
   active?: boolean;
   accessibilityLabel: string;
+  compact?: boolean;
 }
 
 export function MapControlButton({
@@ -18,25 +19,38 @@ export function MapControlButton({
   onPress,
   active,
   accessibilityLabel,
+  compact = false,
 }: MapControlButtonProps) {
+  const size = compact ? 36 : SIZE;
   return (
-    <View style={[styles.circle, active && styles.circleActive]}>
-      {Platform.OS === 'ios' ? (
-        <View style={styles.fill}>
+    <View
+      style={[
+        styles.circle,
+        compact && styles.circleCompact,
+        active && styles.circleActive,
+        { width: size, height: size, borderRadius: size / 2 },
+      ]}
+    >
+      {!compact && Platform.OS === 'ios' ? (
+        <View style={[styles.fill, { borderRadius: size / 2 }]}>
           <BlurView intensity={32} tint="dark" />
         </View>
       ) : null}
-      <View style={[styles.fill, styles.tint]} />
+      {!compact ? (
+        <View style={[styles.fill, styles.tint, { borderRadius: size / 2 }]} />
+      ) : (
+        <View style={[styles.fill, styles.tintCompact, { borderRadius: size / 2 }]} />
+      )}
       <Pressable
         onPress={onPress}
         style={styles.hit}
         accessibilityRole="button"
         accessibilityLabel={accessibilityLabel}
-        android_ripple={{ color: 'rgba(255,255,255,0.12)', borderless: true, radius: SIZE / 2 }}
+        android_ripple={{ color: 'rgba(255,255,255,0.12)', borderless: true, radius: size / 2 }}
       >
         <Ionicons
           name={icon}
-          size={20}
+          size={compact ? 18 : 20}
           color={active ? darkColors.accent : darkColors.textPrimary}
         />
       </Pressable>
@@ -53,6 +67,9 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: MAP_CHROME_BORDER,
   },
+  circleCompact: {
+    backgroundColor: 'rgba(255,255,255,0.1)',
+  },
   circleActive: {
     borderColor: darkColors.accent,
   },
@@ -63,6 +80,9 @@ const styles = StyleSheet.create({
   },
   tint: {
     backgroundColor: MAP_CHROME_TINT,
+  },
+  tintCompact: {
+    backgroundColor: 'transparent',
   },
   hit: {
     ...StyleSheet.absoluteFill,

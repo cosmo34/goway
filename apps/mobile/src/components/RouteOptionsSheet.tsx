@@ -16,6 +16,11 @@ interface RouteOptionsSheetProps {
   onPreview: (index: number) => void;
   onStart: (index: number) => void;
   onClose: () => void;
+  /** Affiche « Enregistrer ce trajet » si le départ n’est pas immédiat. */
+  canSaveTrip?: boolean;
+  onSaveTrip?: () => void;
+  onRemoveSavedTrip?: () => void;
+  tripSaved?: boolean;
 }
 
 function transitLegs(route: Route) {
@@ -35,6 +40,10 @@ export function RouteOptionsSheet({
   onPreview,
   onStart,
   onClose,
+  canSaveTrip,
+  onSaveTrip,
+  onRemoveSavedTrip,
+  tripSaved,
 }: RouteOptionsSheetProps) {
   const { t } = useTranslation();
 
@@ -125,6 +134,33 @@ export function RouteOptionsSheet({
           <Text style={styles.startButtonText}>{t('map.startNavigation')}</Text>
           <Ionicons name="arrow-forward" size={15} color={colors.accent} />
         </Pressable>
+
+        {canSaveTrip && (onSaveTrip || onRemoveSavedTrip) ? (
+          <Pressable
+            style={[styles.saveButton, tripSaved && styles.saveButtonDone]}
+            onPress={() => {
+              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+              if (tripSaved) {
+                onRemoveSavedTrip?.();
+              } else {
+                onSaveTrip?.();
+              }
+            }}
+            accessibilityRole="button"
+            accessibilityLabel={
+              tripSaved ? t('tripAssist.removeSavedTrip') : t('tripAssist.saveTrip')
+            }
+          >
+            <Ionicons
+              name={tripSaved ? 'bookmark' : 'bookmark-outline'}
+              size={15}
+              color={tripSaved ? colors.accent : colors.textPrimary}
+            />
+            <Text style={[styles.saveButtonText, tripSaved && styles.saveButtonTextDone]}>
+              {tripSaved ? t('tripAssist.removeSavedTrip') : t('tripAssist.saveTrip')}
+            </Text>
+          </Pressable>
+        ) : null}
       </View>
     </View>
   );
@@ -270,6 +306,31 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(255, 255, 255, 0.12)',
     paddingVertical: 9,
     marginTop: 2,
+  },
+  saveButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.xs,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.10)',
+    paddingVertical: 8,
+    marginTop: spacing.xs,
+    backgroundColor: 'rgba(255, 255, 255, 0.04)',
+  },
+  saveButtonDone: {
+    borderColor: 'rgba(45, 212, 191, 0.28)',
+    backgroundColor: 'rgba(45, 212, 191, 0.08)',
+  },
+  saveButtonText: {
+    ...typography.labelMedium,
+    color: colors.textPrimary,
+    fontWeight: '600',
+    fontSize: 13,
+  },
+  saveButtonTextDone: {
+    color: colors.accent,
   },
   startButtonText: {
     ...typography.labelMedium,

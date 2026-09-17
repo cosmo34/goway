@@ -5,19 +5,35 @@ import * as Haptics from 'expo-haptics';
 import { TransitMap, type TransitMapHandle } from '../../src/components/TransitMap';
 import { SearchBar } from '../../src/components/SearchBar';
 import { NoRouteFoundCard } from '../../src/components/NoRouteFoundCard';
+import { ChatModePanel } from '../../src/components/ChatModePanel';
 import { RouteOptionsSheet } from '../../src/components/RouteOptionsSheet';
 import { InAppNavigationCard } from '../../src/components/InAppNavigationCard';
-import { AppMenuButton } from '../../src/components/AppMenuButton';
-import { MapFloatingControls } from '../../src/components/MapFloatingControls';
+import { MapTopBar } from '../../src/components/MapTopBar';
 import { MapLayersSheet } from '../../src/components/MapLayersSheet';
 import { StopInfoCard } from '../../src/components/StopInfoCard';
 import { PlanningRouteCard } from '../../src/components/PlanningRouteCard';
-import { ChatModePanel } from '../../src/components/ChatModePanel';
-import { MapModeToggle, type MapInteractionMode } from '../../src/components/MapModeToggle';
 import { PlaceProposalControls } from '../../src/components/PlaceProposalControls';
+import { formatDepartureLabel } from '../../src/components/DepartureTimeSheet';
+import { parseTripIntent } from '../../src/services/chat/tripIntent';
+import {
+  chatPhaseAfterRoute,
+  continueAfterOriginSelect,
+  createInitialChatState,
+  handleChatPlaceSelect,
+  handleChatQuickReply,
+  handleChatUserText,
+} from '../../src/services/chat/chatAgent';
+import type { ChatSessionState, ChatTripRequest } from '../../src/services/chat/chatTypes';
+import {
+  getNextScheduledTrip,
+  isFutureDeparture,
+  minutesUntilDeparture,
+  saveScheduledTrip,
+  type ScheduledTrip,
+} from '../../src/services/storage/scheduledTripsStorage';
+import { scheduledTripReminderService } from '../../src/services/scheduledTrip/scheduledTripReminderService';
 import { useMapVignetteLayout } from '../../src/hooks/useMapVignetteLayout';
 import { useViewportStops } from '../../src/hooks/useViewportStops';
-import { MapWeatherWidget, MAP_WEATHER_WIDGET_SIZE } from '../../src/components/MapWeatherWidget';
 import { useMapWeather } from '../../src/hooks/useMapWeather';
 import { useTransitStore } from '../../src/stores/transitStore';
 import type {
@@ -49,22 +65,11 @@ import {
   type NavigationStep,
 } from '../../src/services/routing/navigationSteps';
 import { searchPlacesApi, getLineDetailApi, buildRouteGeometryApi, listLineShapesApi, type LineShape } from '../../src/services/api/transitApi';
-import {
-  createInitialChatState,
-  handleChatUserText,
-  handleChatQuickReply,
-  handleChatPlaceSelect,
-  chatPhaseAfterRoute,
-  setNavigationGuidance,
-} from '../../src/services/chat/chatAgent';
-import {
-  formatStepGuidance,
-  type ChatSessionState,
-  type ChatTripRequest,
-} from '../../src/services/chat/chatTypes';
-import { colors, spacing } from '../../src/theme';
+import { spacing } from '../../src/theme';
 import type { Region } from 'react-native-maps';
-import { defaultMapRegion } from '../../src/utils/mapRegion';
+import { defaultMapRegion, isMapRegionInServiceArea } from '../../src/utils/mapRegion';
+import { isInMontpellierServiceArea } from '../../src/utils/location';
+import { MONTPELLIER_BOUNDS } from '../../src/config/tam';
 import { clusterId, clusterStops } from '../../src/utils/clusterStops';
 import { stopMatchesEnabledModes } from '../../src/utils/transportModeFilter';
 import { mergeSearchSuggestions, searchPlacesLocally } from '../../src/utils/localPlaceSearch';
@@ -76,6 +81,8 @@ import { useTranslation } from 'react-i18next';
 const SEARCH_DEBOUNCE_MS = 120;
 const MIN_QUERY_LENGTH = 2;
 
+type TripAssistPhase = 'idle' | 'pick_origin' | 'pick_destination';
+
 export default function MapScreen() {
   const { t } = useTranslation();
   const insets = useSafeAreaInsets();
@@ -85,14 +92,6 @@ export default function MapScreen() {
   const hasCentered = useRef(false);
   const navigationActive = useTransitStore((state) => state.navigationActive);
   const { location, refresh: refreshLocation } = useUserLocation(true, navigationActive);
-  const [interactionMode, setInteractionMode] = useState<MapInteractionMode>('chat');
-  const [chatState, setChatState] = useState<ChatSessionState>(() =>
-    createInitialChatState((key) => t(key))
-  );
-  const chatStateRef = useRef(chatState);
-  chatStateRef.current = chatState;
-  const chatBusyRef = useRef(false);
-  const lastGuidedStepRef = useRef<number>(-1);
   const [showStops, setShowStops] = useState(true);
   const [showPois, setShowPois] = useState(true);
   const [layersSheetOpen, setLayersSheetOpen] = useState(false);
@@ -108,6 +107,25 @@ export default function MapScreen() {
   const [routeSearchSettled, setRouteSearchSettled] = useState(false);
   const [isLoadingGeometry, setIsLoadingGeometry] = useState(false);
   const geometryInFlightRef = useRef(new Map<string, Promise<Route>>());
+  const [tripOriginMode, setTripOriginMode] = useState<'gps' | 'custom'>('gps');
+  const [tripOriginQuery, setTripOriginQuery] = useState('');
+  const [customTripOrigin, setCustomTripOrigin] = useState<Coordinates | null>(null);
+  const [departureTime, setDepartureTime] = useState(() => new Date());
+  const [activeSearchField, setActiveSearchField] = useState<'origin' | 'destination'>(
+    'destination'
+  );
+  const [tripAssistMessage, setTripAssistMessage] = useState<string | null>(null);
+  const [tripAssistPhase, setTripAssistPhase] = useState<TripAssistPhase>('idle');
+  const [pendingDestQuery, setPendingDestQuery] = useState<string | null>(null);
+  const [savedTrip, setSavedTrip] = useState<ScheduledTrip | null>(null);
+  const [tripJustSaved, setTripJustSaved] = useState(false);
+  const [chatActive, setChatActive] = useState(false);
+  const [chatState, setChatState] = useState<ChatSessionState>(() =>
+    createInitialChatState((key) => key)
+  );
+  const chatStateRef = useRef(chatState);
+  chatStateRef.current = chatState;
+  const chatBusyRef = useRef(false);
 
   const {
     searchQuery,
@@ -279,36 +297,50 @@ export default function MapScreen() {
   useEffect(() => {
     if (!location || hasCentered.current) return;
     hasCentered.current = true;
-    mapRef.current?.recenter(location);
+    if (isInMontpellierServiceArea(location.latitude, location.longitude)) {
+      mapRef.current?.recenter(location);
+    } else {
+      mapRef.current?.recenter({ ...MONTPELLIER_BOUNDS.center });
+      setMapRegion(defaultMapRegion());
+    }
   }, [location]);
 
   useEffect(() => {
-    if (!location) return;
-    fetchNearbyPOIs(location, 1500).then(setMapPois).catch(() => setMapPois([]));
-  }, [location, setMapPois]);
+    const center = {
+      latitude: mapRegion.latitude,
+      longitude: mapRegion.longitude,
+    };
+    if (!isMapRegionInServiceArea(mapRegion)) {
+      setMapPois([]);
+      return;
+    }
+    fetchNearbyPOIs(center, 1500).then(setMapPois).catch(() => setMapPois([]));
+  }, [mapRegion.latitude, mapRegion.longitude, mapRegion.latitudeDelta, setMapPois]);
 
   const itineraryVisible = routeOptions.length > 0 || navigationActive;
   const viewportStopsEnabled = showStops && !lineDetail && !itineraryVisible;
 
   useEffect(() => {
-    if (interactionMode !== 'map') return;
     let cancelled = false;
 
     const loadShapes = () => {
       void listLineShapesApi()
         .then((shapes) => {
-          if (!cancelled) setNetworkLineShapes(shapes);
+          if (!cancelled && shapes.length > 0) setNetworkLineShapes(shapes);
         })
         .catch(() => {
-          if (!cancelled) setNetworkLineShapes([]);
+          // Conserver les tracés déjà en mémoire si l’API est temporairement indisponible.
         });
     };
 
     loadShapes();
+    // Nouvelle tentative si l’API démarre après l’app (ex. simulateur).
+    const retry = setTimeout(loadShapes, 2500);
     return () => {
       cancelled = true;
+      clearTimeout(retry);
     };
-  }, [interactionMode, modesKey]);
+  }, [modesKey]);
 
   const handleViewportStops = useCallback(
     (stops: Stop[]) => {
@@ -361,11 +393,18 @@ export default function MapScreen() {
     [selectedStops, setSelectedStops, hapticFeedback, enabledTransportModes]
   );
 
+  const resolveTripOrigin = useCallback(async (): Promise<Coordinates | null> => {
+    if (tripOriginMode === 'custom' && customTripOrigin) {
+      return customTripOrigin;
+    }
+    return location ?? (await refreshLocation());
+  }, [tripOriginMode, customTripOrigin, location, refreshLocation]);
+
   const handleNavigateToStop = useCallback(
     async (stop: Stop) => {
       if (hapticFeedback) Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
 
-      const origin = location ?? (await refreshLocation());
+      const origin = await resolveTripOrigin();
       if (!origin) return;
 
       const seq = ++planSeqRef.current;
@@ -420,7 +459,7 @@ export default function MapScreen() {
           origin,
           stop.coordinates,
           3,
-          new Date(),
+          departureTime,
           enabledTransportModes
         );
         if (seq !== planSeqRef.current) return;
@@ -468,8 +507,8 @@ export default function MapScreen() {
     },
     [
       modesKey,
-      location,
-      refreshLocation,
+      resolveTripOrigin,
+      departureTime,
       hapticFeedback,
       enabledTransportModes,
       setSelectedStops,
@@ -513,10 +552,27 @@ export default function MapScreen() {
           mapRef.current?.fitRoute(detail.shape);
         }
       } catch {
-        setLineDetail(null);
+        // Fallback : tracé déjà chargé avec le réseau
+        const segs = networkLineShapes.filter((s) => s.id === line.id);
+        const shape = segs.flatMap((s) => s.coordinates);
+        if (shape.length > 1) {
+          setLineDetail({
+            id: line.id,
+            shortName: line.shortName,
+            longName: line.longName,
+            color: line.color,
+            mode: line.mode,
+            directions: [],
+            stops: [],
+            shape,
+          });
+          mapRef.current?.fitRoute(shape);
+        } else {
+          setLineDetail(null);
+        }
       }
     },
-    [hapticFeedback, setSelectedStops]
+    [hapticFeedback, setSelectedStops, networkLineShapes]
   );
 
   const handleMapRegionChange = useCallback((region: Region) => {
@@ -636,14 +692,17 @@ export default function MapScreen() {
   const lastFollowAtRef = useRef(0);
   const lastFollowHeadingRef = useRef<number | null>(null);
   useEffect(() => {
-    if (!walkNavigationActive || !location || !currentNavigationStep) return;
+    if (!navigationActive || !location || !currentNavigationStep) return;
     const now = Date.now();
-    const guidanceHeading = walkGuidanceHeading(
-      location,
-      currentNavigationStep.pathCoordinates,
-      currentNavigationStep.to,
-      userHeading
-    );
+    const isWalk = currentNavigationStep.kind === 'walk';
+    const guidanceHeading = isWalk
+      ? walkGuidanceHeading(
+          location,
+          currentNavigationStep.pathCoordinates,
+          currentNavigationStep.to,
+          userHeading
+        )
+      : userHeading ?? 0;
     const headingDelta =
       lastFollowHeadingRef.current != null
         ? Math.abs(guidanceHeading - lastFollowHeadingRef.current)
@@ -652,96 +711,30 @@ export default function MapScreen() {
     if (now - lastFollowAtRef.current < 250 && !headingChanged) return;
     lastFollowAtRef.current = now;
     lastFollowHeadingRef.current = guidanceHeading;
-    mapRef.current?.followUser(location, guidanceHeading);
+    // Centre la position au milieu de la zone carte visible (mapPadding).
+    mapRef.current?.followUser(
+      location,
+      isWalk ? guidanceHeading : 0,
+      isWalk ? undefined : { altitude: 420, zoom: 16.2 }
+    );
   }, [
-    walkNavigationActive,
+    navigationActive,
     location?.latitude,
     location?.longitude,
     userHeading,
     currentNavigationStep,
   ]);
 
-  // Entrée / retour en vue rue dès qu’une étape marche commence.
+  // Entrée / retour en vue guidage dès qu’une étape commence.
   useEffect(() => {
-    if (!walkNavigationActive || !currentNavigationStep) return;
+    if (!navigationActive || !currentNavigationStep) return;
     const coords = location ?? currentNavigationStep.from;
-    enterWalkStreetView(currentNavigationStep, coords, userHeading);
-  }, [walkNavigationActive, navigationStepIndex]);
-
-  useEffect(() => {
-    if (interactionMode !== 'chat' || !navigationActive || !currentNavigationStep) return;
-    if (lastGuidedStepRef.current === navigationStepIndex) return;
-    lastGuidedStepRef.current = navigationStepIndex;
-    const distanceMeters = location
-      ? Math.round(haversineMeters(location, currentNavigationStep.to) / 25) * 25
-      : null;
-    const guidance = formatStepGuidance(
-      currentNavigationStep,
-      navigationStepIndex,
-      navigationSteps.length,
-      distanceMeters
-    );
-    setChatState((prev) => {
-      const next = setNavigationGuidance(prev, guidance);
-      chatStateRef.current = next;
-      return next;
-    });
-  }, [
-    interactionMode,
-    navigationActive,
-    currentNavigationStep,
-    navigationStepIndex,
-    navigationSteps.length,
-  ]);
-
-  // Rafraîchir la distance affichée (~25 m) sans empiler de messages.
-  useEffect(() => {
-    if (interactionMode !== 'chat' || !navigationActive || !currentNavigationStep || !location) {
-      return;
+    if (currentNavigationStep.kind === 'walk') {
+      enterWalkStreetView(currentNavigationStep, coords, userHeading);
+    } else {
+      mapRef.current?.followUser(coords, 0, { altitude: 420, zoom: 16.2 });
     }
-    if (lastGuidedStepRef.current !== navigationStepIndex) return;
-    if (currentNavigationStep.kind === 'arrive') return;
-
-    const distanceMeters = Math.round(haversineMeters(location, currentNavigationStep.to) / 25) * 25;
-    const guidance = formatStepGuidance(
-      currentNavigationStep,
-      navigationStepIndex,
-      navigationSteps.length,
-      distanceMeters
-    );
-    setChatState((prev) => {
-      const last = [...prev.messages].reverse().find((m) => m.kind === 'nav-step');
-      if (!last || last.text === guidance) return prev;
-      const next = setNavigationGuidance(prev, guidance);
-      chatStateRef.current = next;
-      return next;
-    });
-  }, [
-    interactionMode,
-    navigationActive,
-    currentNavigationStep,
-    navigationStepIndex,
-    navigationSteps.length,
-    location?.latitude,
-    location?.longitude,
-  ]);
-
-  const wasNavigatingRef = useRef(false);
-  useEffect(() => {
-    if (interactionMode !== 'chat') return;
-    if (navigationActive) {
-      wasNavigatingRef.current = true;
-      return;
-    }
-    if (!wasNavigatingRef.current) return;
-    wasNavigatingRef.current = false;
-    if (chatStateRef.current.phase !== 'navigating') return;
-    setChatState((prev) => {
-      const next = chatPhaseAfterRoute({ ...prev, phase: 'done' }, t('chat.arrived'), true, t);
-      chatStateRef.current = next;
-      return next;
-    });
-  }, [interactionMode, navigationActive, t]);
+  }, [navigationActive, navigationStepIndex]);
 
   const fullRoutePath = useMemo(() => {
     if (displayedPath?.length) return displayedPath;
@@ -770,20 +763,7 @@ export default function MapScreen() {
       ? displayedPath
       : activeStepPath;
 
-  useEffect(() => {
-    if (!navigationActive || !activeStepPath?.length) return;
-    // En marche : le followUser gère le POV — ne pas fitRoute.
-    if (currentNavigationStep?.kind === 'walk') return;
-    mapRef.current?.fitRoute(activeStepPath);
-  }, [navigationActive, navigationStepIndex, activeStepPath, currentNavigationStep?.kind]);
-
-  // Eviter le fit global qui écrase le focus étape / POV marche.
-  useEffect(() => {
-    if (!navigationActive || activeStepPath?.length) return;
-    if (currentNavigationStep?.kind === 'walk') return;
-    if (!displayedPath?.length) return;
-    mapRef.current?.fitRoute(displayedPath);
-  }, [navigationActive, displayedPath, activeStepPath, currentNavigationStep?.kind]);
+  // Pendant la navigation, followUser centre la position — pas de fitRoute.
 
   const handlePreviewRoute = useCallback(
     (index: number) => {
@@ -821,13 +801,11 @@ export default function MapScreen() {
       startNavigation(steps);
 
       const firstStep = steps[0];
+      const followCoords = location ?? origin;
       if (firstStep?.kind === 'walk') {
-        const followCoords = location ?? origin;
         enterWalkStreetView(firstStep, followCoords, null);
-      } else if (firstStep?.pathCoordinates?.length) {
-        mapRef.current?.fitRoute(firstStep.pathCoordinates);
-      } else if (enriched.geometry?.length) {
-        mapRef.current?.fitRoute(enriched.geometry);
+      } else {
+        mapRef.current?.followUser(followCoords, 0, { altitude: 420, zoom: 16.2 });
       }
 
       if (hapticFeedback) Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
@@ -849,202 +827,6 @@ export default function MapScreen() {
     ]
   );
 
-  const runChatTrip = useCallback(
-    async (trip: ChatTripRequest) => {
-      const seq = ++planSeqRef.current;
-      prevModesKeyRef.current = modesKey;
-      setSelectedStops([]);
-      setIsPlanningRoute(true);
-      setRouteSearchSettled(false);
-      setRoutePathsById({});
-      setEnrichedRoutesById({});
-      setSelectedLine(null);
-      setLineDetail(null);
-      stopNavigation();
-      setActiveRoute(null);
-      setRouteOptions([]);
-
-      setOriginCoordinates(trip.origin);
-      setDestinationCoordinates(trip.destination);
-      setDestinationLabel(trip.destinationLabel);
-
-      try {
-        const routes = await routingService.planRoutes(
-          trip.origin,
-          trip.destination,
-          3,
-          trip.departureTime,
-          enabledTransportModes
-        );
-
-        if (seq !== planSeqRef.current) return;
-
-        if (!routes.length) {
-          setIsPlanningRoute(false);
-          setRouteSearchSettled(true);
-          setChatState((prev) => chatPhaseAfterRoute(prev, t('chat.noRoute'), false, t));
-          return;
-        }
-
-        applyPlannedRoutes(routes, seq);
-
-        const best = routes[0];
-        const enriched = await fetchRouteGeometry(best, trip.origin, trip.destination, {
-          fit: false,
-        });
-        if (seq !== planSeqRef.current) return;
-
-        setSelectedRouteIndex(0);
-        setActiveRoute(enriched);
-        const stops = await collectRouteStops(enriched, mapStops);
-        setRouteStops(stops);
-        setBoardingStop(findBoardingStop(enriched, stops));
-
-        const steps = buildNavigationSteps(enriched, trip.origin, trip.destination, stops);
-        startNavigation(steps);
-        lastGuidedStepRef.current = -1;
-
-        const departure = enriched.departureTime.toLocaleTimeString('fr-FR', {
-          hour: '2-digit',
-          minute: '2-digit',
-        });
-        const arrival = enriched.arrivalTime.toLocaleTimeString('fr-FR', {
-          hour: '2-digit',
-          minute: '2-digit',
-        });
-
-        const summary = t('chat.routeSummary', {
-          duration: enriched.totalDurationMinutes,
-          walk: enriched.walkingMinutes,
-          departure,
-          arrival,
-        });
-
-        setChatState((prev) => {
-          const withSummary = chatPhaseAfterRoute(prev, summary, true, t);
-          chatStateRef.current = withSummary;
-          return withSummary;
-        });
-
-        const firstStep = steps[0];
-        if (firstStep?.kind === 'walk') {
-          enterWalkStreetView(firstStep, trip.origin, null);
-        } else if (firstStep?.pathCoordinates?.length) {
-          mapRef.current?.fitRoute(firstStep.pathCoordinates);
-        } else if (enriched.geometry?.length) {
-          mapRef.current?.fitRoute(enriched.geometry);
-        }
-        if (hapticFeedback) {
-          void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-        }
-      } catch {
-        if (seq === planSeqRef.current) {
-          setIsPlanningRoute(false);
-          setRouteSearchSettled(true);
-          setChatState((prev) => chatPhaseAfterRoute(prev, t('chat.noRoute'), false, t));
-        }
-      }
-    },
-    [
-      modesKey,
-      enabledTransportModes,
-      applyPlannedRoutes,
-      fetchRouteGeometry,
-      enterWalkStreetView,
-      mapStops,
-      setSelectedStops,
-      setOriginCoordinates,
-      setDestinationCoordinates,
-      setDestinationLabel,
-      stopNavigation,
-      setActiveRoute,
-      setRouteOptions,
-      setSelectedRouteIndex,
-      setRouteStops,
-      setBoardingStop,
-      startNavigation,
-      hapticFeedback,
-      t,
-    ]
-  );
-
-  const chatCtx = useMemo(
-    () => ({
-      userLocation: location,
-      mapStops,
-      t: (key: string, opts?: Record<string, string | number>) => t(key, opts),
-      resolveUserLocation: refreshLocation,
-    }),
-    [location, mapStops, t, refreshLocation]
-  );
-
-  const onChatSend = useCallback(
-    async (text: string) => {
-      if (chatBusyRef.current) return;
-      chatBusyRef.current = true;
-      try {
-        const result = await handleChatUserText(chatStateRef.current, text, chatCtx);
-        setChatState(result.state);
-        chatStateRef.current = result.state;
-        if (result.tripRequest) {
-          await runChatTrip(result.tripRequest);
-        }
-      } finally {
-        chatBusyRef.current = false;
-      }
-    },
-    [chatCtx, runChatTrip]
-  );
-
-  const onChatQuickReply = useCallback(
-    async (id: string) => {
-      if (chatBusyRef.current) return;
-      chatBusyRef.current = true;
-      try {
-        const result = await handleChatQuickReply(chatStateRef.current, id, chatCtx);
-        setChatState(result.state);
-        chatStateRef.current = result.state;
-        if (result.tripRequest) {
-          await runChatTrip(result.tripRequest);
-        }
-      } finally {
-        chatBusyRef.current = false;
-      }
-    },
-    [chatCtx, runChatTrip]
-  );
-
-  const onChatPlaceSelect = useCallback(
-    (place: SearchSuggestion) => {
-      const result = handleChatPlaceSelect(chatStateRef.current, place, chatCtx);
-      setChatState(result.state);
-      chatStateRef.current = result.state;
-    },
-    [chatCtx]
-  );
-
-  const handleInteractionModeChange = useCallback(
-    (mode: MapInteractionMode) => {
-      setInteractionMode(mode);
-      if (mode === 'chat') {
-        setSelectedStops([]);
-        setLayersSheetOpen(false);
-        setChatState((prev) => {
-          const stillAtStart =
-            prev.phase === 'awaiting_destination' &&
-            !prev.destination &&
-            prev.messages.length <= 2 &&
-            prev.messages.every((m) => m.role === 'assistant');
-          if (stillAtStart || prev.messages.length === 0) {
-            return createInitialChatState((key) => t(key));
-          }
-          return prev;
-        });
-      }
-    },
-    [setSelectedStops, t]
-  );
-
   const resolveDestination = useCallback(
     async (coords: Coordinates, label?: string) => {
       const seq = ++planSeqRef.current;
@@ -1062,26 +844,31 @@ export default function MapScreen() {
       setLineDetail(null);
       Keyboard.dismiss();
 
-      const origin = location ?? (await refreshLocation());
-      if (!origin) {
-        if (seq === planSeqRef.current) setIsPlanningRoute(false);
-        return;
-      }
-
-      setOriginCoordinates(origin);
+      // Enregistrer la destination tout de suite (même si l’origine GPS n’est pas prête).
       setDestinationCoordinates(coords);
       setDestinationLabel(label ?? null);
-      setSearchQuery('');
+      setSearchQuery(label ?? '');
+      setActiveSearchField('destination');
       stopNavigation();
       setActiveRoute(null);
       setRouteOptions([]);
+
+      const origin =
+        (await resolveTripOrigin()) ??
+        (location
+          ? location
+          : isMapRegionInServiceArea(mapRegion)
+            ? { latitude: mapRegion.latitude, longitude: mapRegion.longitude }
+            : { ...MONTPELLIER_BOUNDS.center });
+
+      setOriginCoordinates(origin);
 
       try {
         const routes = await routingService.planRoutes(
           origin,
           coords,
           3,
-          new Date(),
+          departureTime,
           enabledTransportModes
         );
         applyPlannedRoutes(routes, seq);
@@ -1098,8 +885,10 @@ export default function MapScreen() {
     },
     [
       modesKey,
+      resolveTripOrigin,
+      departureTime,
       location,
-      refreshLocation,
+      mapRegion,
       setOriginCoordinates,
       setDestinationCoordinates,
       setDestinationLabel,
@@ -1137,7 +926,11 @@ export default function MapScreen() {
     let cancelled = false;
 
     const replan = async () => {
-      const origin = originCoordinates ?? location ?? (await refreshLocation());
+      const origin =
+        (tripOriginMode === 'custom' ? customTripOrigin : null) ??
+        originCoordinates ??
+        location ??
+        (await refreshLocation());
       if (!origin || cancelled || seq !== planSeqRef.current) return;
 
       setIsPlanningRoute(true);
@@ -1151,7 +944,7 @@ export default function MapScreen() {
           origin,
           destinationCoordinates,
           3,
-          new Date(),
+          departureTime,
           enabledTransportModes
         );
         if (cancelled || seq !== planSeqRef.current) return;
@@ -1175,17 +968,68 @@ export default function MapScreen() {
     location,
     refreshLocation,
     enabledTransportModes,
+    departureTime,
+    tripOriginMode,
+    customTripOrigin,
     applyPlannedRoutes,
     setRouteOptions,
   ]);
 
   useEffect(() => {
-    if (destinationCoordinates) {
+    if (!destinationCoordinates || navigationActive) return;
+    if (tripOriginMode === 'custom' && !customTripOrigin) return;
+    // En chat, runChatTrip planifie déjà avec l’origine / l’heure exactes —
+    // éviter un second plan qui invalide le seq et affiche un faux « aucun trajet ».
+    if (chatActive) return;
+
+    const seq = ++planSeqRef.current;
+    let cancelled = false;
+
+    const replan = async () => {
+      const origin = await resolveTripOrigin();
+      if (!origin || cancelled || seq !== planSeqRef.current) return;
+
+      setIsPlanningRoute(true);
+      setRouteSearchSettled(false);
+      setRoutePathsById({});
+      setEnrichedRoutesById({});
+      setRouteOptions([]);
+      setOriginCoordinates(origin);
+
+      try {
+        const routes = await routingService.planRoutes(
+          origin,
+          destinationCoordinates,
+          3,
+          departureTime,
+          enabledTransportModes
+        );
+        if (cancelled || seq !== planSeqRef.current) return;
+        applyPlannedRoutes(routes, seq);
+      } catch {
+        if (!cancelled && seq === planSeqRef.current) {
+          setIsPlanningRoute(false);
+          setRouteSearchSettled(true);
+        }
+      }
+    };
+
+    void replan();
+    return () => {
+      cancelled = true;
+    };
+    // Intentionally tied to departure / custom origin changes only.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [departureTime, tripOriginMode, customTripOrigin, chatActive]);
+
+  useEffect(() => {
+    if (destinationCoordinates && activeSearchField === 'destination') {
       setSearchSuggestions([]);
       return;
     }
 
-    const query = searchQuery.trim();
+    const query =
+      activeSearchField === 'origin' ? tripOriginQuery.trim() : searchQuery.trim();
     if (query.length < MIN_QUERY_LENGTH) {
       setSearchSuggestions([]);
       setIsSearching(false);
@@ -1200,18 +1044,22 @@ export default function MapScreen() {
       setIsSearching(true);
 
       try {
+        const bias =
+          activeSearchField === 'origin'
+            ? location
+            : customTripOrigin ?? location;
         const places = await searchPlacesApi(query, {
           scope: searchScope,
-          userLat: location?.latitude,
-          userLon: location?.longitude,
+          userLat: bias?.latitude ?? mapRegion.latitude,
+          userLon: bias?.longitude ?? mapRegion.longitude,
         });
 
         if (seq !== searchSeq.current) return;
-        if (destinationCoordinates) return;
+        if (destinationCoordinates && activeSearchField === 'destination') return;
 
         setSearchSuggestions(mergeSearchSuggestions(localResults, places));
       } catch {
-        if (seq === searchSeq.current && !destinationCoordinates) {
+        if (seq === searchSeq.current) {
           setSearchSuggestions(localResults);
         }
       } finally {
@@ -1222,9 +1070,14 @@ export default function MapScreen() {
     return () => clearTimeout(timer);
   }, [
     searchQuery,
+    tripOriginQuery,
+    activeSearchField,
     searchScope,
     location,
+    customTripOrigin,
     mapStops,
+    mapRegion.latitude,
+    mapRegion.longitude,
     destinationCoordinates,
     setSearchSuggestions,
     setIsSearching,
@@ -1232,7 +1085,11 @@ export default function MapScreen() {
 
   const handleChangeText = useCallback(
     (text: string) => {
+      setActiveSearchField('destination');
       setSearchQuery(text);
+      if (tripAssistPhase !== 'pick_destination' && tripAssistPhase !== 'pick_origin') {
+        setTripAssistMessage(null);
+      }
       if (!text.trim()) {
         searchSeq.current += 1;
         routePathSeq.current += 1;
@@ -1244,6 +1101,11 @@ export default function MapScreen() {
         setEnrichedRoutesById({});
         clearRouteNavigation();
         return;
+      }
+      // Nouvelle saisie = nouvelle destination (annuler le choix précédent).
+      if (destinationCoordinates) {
+        setDestinationCoordinates(null);
+        setDestinationLabel(null);
       }
       if (text.trim().length >= MIN_QUERY_LENGTH) {
         setSelectedStops([]);
@@ -1258,23 +1120,664 @@ export default function MapScreen() {
       }
     },
     [
+      tripAssistPhase,
       setSearchQuery,
       setSearchSuggestions,
       setIsSearching,
       clearRouteNavigation,
       stopNavigation,
       setSelectedStops,
+      setDestinationCoordinates,
+      setDestinationLabel,
       routeOptions.length,
       destinationCoordinates,
     ]
   );
 
-  const handleSuggestionSelect = useCallback(
-    (suggestion: SearchSuggestion) => {
-      void resolveDestination(suggestion.coordinates, suggestion.name);
+  const handleOriginChange = useCallback(
+    (text: string) => {
+      setActiveSearchField('origin');
+      setTripOriginMode('custom');
+      setTripOriginQuery(text);
+      setCustomTripOrigin(null);
+      if (!text.trim()) {
+        setTripOriginMode('gps');
+        setSearchSuggestions([]);
+      }
     },
-    [resolveDestination]
+    [setSearchSuggestions]
   );
+
+  const resolvePlaceQuery = useCallback(
+    async (query: string): Promise<SearchSuggestion[]> => {
+      const local = searchPlacesLocally(query, mapStops);
+      try {
+        const places = await searchPlacesApi(query, {
+          scope: searchScope,
+          userLat: location?.latitude ?? mapRegion.latitude,
+          userLon: location?.longitude ?? mapRegion.longitude,
+          limit: 8,
+        });
+        return mergeSearchSuggestions(local, places).slice(0, 8);
+      } catch {
+        return local.slice(0, 8);
+      }
+    },
+    [mapStops, searchScope, location, mapRegion.latitude, mapRegion.longitude]
+  );
+
+  const chatCtx = useMemo(
+    () => ({
+      userLocation: location,
+      mapStops,
+      t: (key: string, opts?: Record<string, string | number>) => t(key, opts),
+      resolveUserLocation: refreshLocation,
+    }),
+    [location, mapStops, t, refreshLocation]
+  );
+
+  const runChatTrip = useCallback(
+    async (trip: ChatTripRequest) => {
+      // Appliquer l’origine / l’heure du trajet chat (pas le state React encore stale).
+      setDepartureTime(trip.departureTime);
+      setTripOriginMode('custom');
+      setCustomTripOrigin(trip.origin);
+      setTripOriginQuery(trip.originLabel);
+      setSearchQuery(trip.destinationLabel);
+      setTripJustSaved(false);
+
+      const seq = ++planSeqRef.current;
+      prevModesKeyRef.current = modesKey;
+      searchSeq.current += 1;
+      routePathSeq.current += 1;
+      geometryInFlightRef.current.clear();
+      setSearchSuggestions([]);
+      setIsSearching(false);
+      setIsPlanningRoute(true);
+      setRouteSearchSettled(false);
+      setRoutePathsById({});
+      setEnrichedRoutesById({});
+      setSelectedLine(null);
+      setLineDetail(null);
+      Keyboard.dismiss();
+
+      setOriginCoordinates(trip.origin);
+      setDestinationCoordinates(trip.destination);
+      setDestinationLabel(trip.destinationLabel);
+      setActiveSearchField('destination');
+      stopNavigation();
+      setActiveRoute(null);
+      setRouteOptions([]);
+
+      try {
+        const routes = await routingService.planRoutes(
+          trip.origin,
+          trip.destination,
+          3,
+          trip.departureTime,
+          enabledTransportModes
+        );
+
+        if (seq !== planSeqRef.current) {
+          // Un autre replan a pris le relais : lire le résultat courant.
+          const current = useTransitStore.getState().routeOptions;
+          if (current[0]) {
+            const best = current[0];
+            const summary = t('chat.routeSummary', {
+              duration: best.totalDurationMinutes,
+              walk: best.walkingMinutes,
+              departure: best.departureTime.toLocaleTimeString('fr-FR', {
+                hour: '2-digit',
+                minute: '2-digit',
+              }),
+              arrival: best.arrivalTime.toLocaleTimeString('fr-FR', {
+                hour: '2-digit',
+                minute: '2-digit',
+              }),
+            });
+            setChatState((prev) => {
+              const next = chatPhaseAfterRoute(prev, summary, true, (key) => t(key));
+              chatStateRef.current = next;
+              return next;
+            });
+          }
+          return;
+        }
+
+        applyPlannedRoutes(routes, seq);
+
+        const best = routes[0];
+        if (!best) {
+          setChatState((prev) => {
+            const next = chatPhaseAfterRoute(prev, t('chat.noRoute'), false, (key) => t(key));
+            chatStateRef.current = next;
+            return next;
+          });
+          return;
+        }
+
+        if (hapticFeedback) {
+          void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        }
+
+        const summary = t('chat.routeSummary', {
+          duration: best.totalDurationMinutes,
+          walk: best.walkingMinutes,
+          departure: best.departureTime.toLocaleTimeString('fr-FR', {
+            hour: '2-digit',
+            minute: '2-digit',
+          }),
+          arrival: best.arrivalTime.toLocaleTimeString('fr-FR', {
+            hour: '2-digit',
+            minute: '2-digit',
+          }),
+        });
+        setChatState((prev) => {
+          const next = chatPhaseAfterRoute(prev, summary, true, (key) => t(key));
+          chatStateRef.current = next;
+          return next;
+        });
+      } catch {
+        if (seq === planSeqRef.current) {
+          setIsPlanningRoute(false);
+          setRouteSearchSettled(true);
+          setChatState((prev) => {
+            const next = chatPhaseAfterRoute(prev, t('chat.noRoute'), false, (key) => t(key));
+            chatStateRef.current = next;
+            return next;
+          });
+        }
+      }
+    },
+    [
+      modesKey,
+      enabledTransportModes,
+      applyPlannedRoutes,
+      stopNavigation,
+      setSearchQuery,
+      setSearchSuggestions,
+      setIsSearching,
+      setOriginCoordinates,
+      setDestinationCoordinates,
+      setDestinationLabel,
+      setActiveRoute,
+      setRouteOptions,
+      hapticFeedback,
+      t,
+    ]
+  );
+
+  const applyChatResult = useCallback(
+    async (result: { state: ChatSessionState; tripRequest?: ChatTripRequest }) => {
+      setChatState(result.state);
+      chatStateRef.current = result.state;
+      if (result.state.pendingSuggestions?.length) {
+        setSearchSuggestions(result.state.pendingSuggestions);
+        setFocusedProposalIndex(0);
+      } else {
+        setSearchSuggestions([]);
+      }
+      if (result.tripRequest) {
+        await runChatTrip(result.tripRequest);
+      }
+    },
+    [runChatTrip, setSearchSuggestions]
+  );
+
+  const onChatSend = useCallback(
+    async (text: string) => {
+      if (chatBusyRef.current) return;
+      chatBusyRef.current = true;
+      try {
+        const result = await handleChatUserText(chatStateRef.current, text, chatCtx);
+        await applyChatResult(result);
+      } finally {
+        chatBusyRef.current = false;
+      }
+    },
+    [chatCtx, applyChatResult]
+  );
+
+  const onChatQuickReply = useCallback(
+    async (id: string) => {
+      if (chatBusyRef.current) return;
+      chatBusyRef.current = true;
+      try {
+        const result = await handleChatQuickReply(chatStateRef.current, id, chatCtx);
+        await applyChatResult(result);
+      } finally {
+        chatBusyRef.current = false;
+      }
+    },
+    [chatCtx, applyChatResult]
+  );
+
+  const onChatPlaceSelect = useCallback(
+    async (place: SearchSuggestion) => {
+      if (chatBusyRef.current) return;
+      chatBusyRef.current = true;
+      try {
+        let result = handleChatPlaceSelect(chatStateRef.current, place, chatCtx);
+        if (result.state.pendingDestQuery && result.state.origin && !result.state.destination) {
+          result = await continueAfterOriginSelect(result.state, chatCtx);
+        } else if (
+          !result.tripRequest &&
+          result.state.origin &&
+          result.state.destination &&
+          result.state.departureTime &&
+          result.state.phase !== 'planning' &&
+          result.state.phase !== 'done'
+        ) {
+          result = await continueAfterOriginSelect(result.state, chatCtx);
+        }
+        await applyChatResult(result);
+      } finally {
+        chatBusyRef.current = false;
+      }
+    },
+    [chatCtx, applyChatResult]
+  );
+
+  const openAssistChat = useCallback(
+    async (phrase: string) => {
+      setChatActive(true);
+      setTripAssistMessage(null);
+      setTripAssistPhase('idle');
+      const initial = createInitialChatState((key) => t(key));
+      chatStateRef.current = initial;
+      setChatState(initial);
+      await onChatSend(phrase);
+    },
+    [t, onChatSend]
+  );
+
+  const closeAssistChat = useCallback(() => {
+    setChatActive(false);
+    chatBusyRef.current = false;
+    setChatState(createInitialChatState((key) => t(key)));
+    setSearchSuggestions([]);
+  }, [t, setSearchSuggestions]);
+
+  const beginDestinationPick = useCallback(
+    async (destQuery: string) => {
+      setActiveSearchField('destination');
+      setSearchQuery(destQuery);
+      setTripAssistPhase('pick_destination');
+
+      const destinations = await resolvePlaceQuery(destQuery);
+      if (destinations.length === 0) {
+        setTripAssistMessage(t('chat.destinationNotFound'));
+        setSearchSuggestions([]);
+        return false;
+      }
+      if (destinations.length > 1) {
+        setDestinationCoordinates(null);
+        setDestinationLabel(null);
+        setSearchSuggestions(destinations);
+        setTripAssistMessage(t('tripAssist.chooseDestination'));
+        return false;
+      }
+
+      const label = destinations[0].displayName || destinations[0].name;
+      setTripAssistMessage(t('tripAssist.destinationSet', { destination: label }));
+      setTripAssistPhase('idle');
+      setPendingDestQuery(null);
+      setSearchSuggestions([]);
+      await resolveDestination(destinations[0].coordinates, label);
+      return true;
+    },
+    [
+      t,
+      resolvePlaceQuery,
+      resolveDestination,
+      setSearchQuery,
+      setSearchSuggestions,
+      setDestinationCoordinates,
+      setDestinationLabel,
+    ]
+  );
+
+  const handleUseMyLocation = useCallback(() => {
+    setTripOriginMode('gps');
+    setTripOriginQuery('');
+    setCustomTripOrigin(null);
+    setActiveSearchField('destination');
+    setSearchSuggestions([]);
+    if (tripAssistPhase === 'pick_origin') {
+      const nextDest = pendingDestQuery ?? searchQuery.trim();
+      setTripAssistMessage(t('tripAssist.originSet', { origin: t('trip.origin') }));
+      if (nextDest) {
+        void (async () => {
+          setIsSearching(true);
+          try {
+            await beginDestinationPick(nextDest);
+          } finally {
+            setIsSearching(false);
+          }
+        })();
+      } else {
+        setTripAssistPhase('pick_destination');
+        setTripAssistMessage(t('tripAssist.chooseDestination'));
+      }
+    }
+  }, [
+    setSearchSuggestions,
+    tripAssistPhase,
+    pendingDestQuery,
+    searchQuery,
+    beginDestinationPick,
+    setIsSearching,
+    t,
+  ]);
+
+  const handleSubmitSearch = useCallback(
+    async (raw: string) => {
+      const text = raw.trim();
+      if (!text) return;
+
+      Keyboard.dismiss();
+      setIsSearching(true);
+      setTripAssistMessage(null);
+      setTripJustSaved(false);
+
+      try {
+        const intent = parseTripIntent(text);
+
+        // Phrase complète → mode conversation (chat) sur la page carte
+        if (intent.isStructured && tripAssistPhase === 'idle') {
+          setIsSearching(false);
+          await openAssistChat(text);
+          return;
+        }
+
+        // Pendant le wizard carte, une saisie courte = refinement du champ actif
+        if (
+          (tripAssistPhase === 'pick_origin' || tripAssistPhase === 'pick_destination') &&
+          text.split(/\s+/).length <= 4 &&
+          !intent.isStructured
+        ) {
+          const field = tripAssistPhase === 'pick_origin' ? 'origin' : 'destination';
+          setActiveSearchField(field);
+          const places = await resolvePlaceQuery(text);
+          if (places.length === 0) {
+            setTripAssistMessage(
+              field === 'origin' ? t('tripAssist.askOrigin') : t('chat.destinationNotFound')
+            );
+            setSearchSuggestions([]);
+            return;
+          }
+          setSearchSuggestions(places);
+          setTripAssistMessage(
+            field === 'origin'
+              ? t('tripAssist.chooseOrigin')
+              : t('tripAssist.chooseDestination')
+          );
+          if (field === 'origin') {
+            setTripOriginMode('custom');
+            setTripOriginQuery(text);
+            setCustomTripOrigin(null);
+          } else {
+            setSearchQuery(text);
+          }
+          return;
+        }
+
+        if (intent.departureTime) {
+          setDepartureTime(intent.departureTime);
+        }
+
+        if (intent.missing.includes('when') && intent.isStructured) {
+          setTripAssistMessage(t('tripAssist.askWhen'));
+          return;
+        }
+
+        if (
+          intent.missing.includes('destination') ||
+          (intent.isStructured && !intent.destinationQuery)
+        ) {
+          if (!intent.destinationQuery) {
+            setTripAssistMessage(t('tripAssist.askDestination'));
+            setTripAssistPhase('pick_destination');
+            return;
+          }
+        }
+
+        const destQuery = intent.destinationQuery ?? text;
+
+        // Origine explicite → confirmation guidée avant la destination
+        if (intent.originQuery) {
+          setActiveSearchField('origin');
+          setTripOriginMode('custom');
+          setTripOriginQuery(intent.originQuery);
+          setCustomTripOrigin(null);
+          setPendingDestQuery(destQuery);
+          setSearchQuery(destQuery);
+
+          const origins = await resolvePlaceQuery(intent.originQuery);
+          if (origins.length === 0) {
+            setTripAssistPhase('pick_origin');
+            setTripAssistMessage(t('tripAssist.askOrigin'));
+            setSearchSuggestions([]);
+            return;
+          }
+
+          setTripAssistPhase('pick_origin');
+          setSearchSuggestions(origins);
+          setTripAssistMessage(t('tripAssist.chooseOrigin'));
+
+          if (origins.length === 1) {
+            setCustomTripOrigin(origins[0].coordinates);
+            setTripOriginQuery(origins[0].displayName || origins[0].name);
+            setTripAssistMessage(
+              t('tripAssist.originSet', {
+                origin: origins[0].displayName || origins[0].name,
+              })
+            );
+            setSearchSuggestions([]);
+            await beginDestinationPick(destQuery);
+          }
+          return;
+        }
+
+        if (intent.useCurrentLocationOrigin) {
+          setTripOriginMode('gps');
+          setTripOriginQuery('');
+          setCustomTripOrigin(null);
+        }
+
+        setPendingDestQuery(null);
+        await beginDestinationPick(destQuery);
+      } finally {
+        setIsSearching(false);
+      }
+    },
+    [
+      t,
+      tripAssistPhase,
+      resolvePlaceQuery,
+      beginDestinationPick,
+      openAssistChat,
+      setSearchQuery,
+      setSearchSuggestions,
+      setIsSearching,
+    ]
+  );
+
+  const handleDepartureChange = useCallback((date: Date) => {
+    setDepartureTime(date);
+    setTripJustSaved(false);
+    setTripAssistMessage((msg) =>
+      msg === t('tripAssist.askWhen') ? null : msg
+    );
+  }, [t]);
+
+  const handleSuggestionSelect = useCallback(
+    (suggestion: SearchSuggestion, field: 'origin' | 'destination' = activeSearchField) => {
+      const label = suggestion.displayName || suggestion.name;
+
+      if (field === 'origin' || tripAssistPhase === 'pick_origin') {
+        setTripOriginMode('custom');
+        setCustomTripOrigin(suggestion.coordinates);
+        setTripOriginQuery(label);
+        setSearchSuggestions([]);
+        setActiveSearchField('destination');
+
+        const nextDest = pendingDestQuery ?? searchQuery.trim();
+        setTripAssistMessage(t('tripAssist.originSet', { origin: label }));
+
+        if (nextDest) {
+          void (async () => {
+            setIsSearching(true);
+            try {
+              await beginDestinationPick(nextDest);
+            } finally {
+              setIsSearching(false);
+            }
+          })();
+        } else {
+          setTripAssistPhase('pick_destination');
+          setTripAssistMessage(t('tripAssist.chooseDestination'));
+        }
+        return;
+      }
+
+      setSearchSuggestions([]);
+      setTripAssistPhase('idle');
+      setPendingDestQuery(null);
+      setTripAssistMessage(t('tripAssist.destinationSet', { destination: label }));
+      void resolveDestination(suggestion.coordinates, label);
+    },
+    [
+      activeSearchField,
+      tripAssistPhase,
+      pendingDestQuery,
+      searchQuery,
+      beginDestinationPick,
+      resolveDestination,
+      setSearchSuggestions,
+      setIsSearching,
+      t,
+    ]
+  );
+
+  const refreshSavedTrip = useCallback(async () => {
+    const next = await scheduledTripReminderService.tick();
+    setSavedTrip(next);
+    if (next) {
+      const mins = minutesUntilDeparture(new Date(next.departureTimeIso));
+      if (mins <= scheduledTripReminderService.leadMinutes && mins >= -5) {
+        setTripAssistMessage(
+          t('tripAssist.leaveSoon', { destination: next.destinationLabel })
+        );
+      }
+    }
+  }, [t]);
+
+  useEffect(() => {
+    void refreshSavedTrip();
+    const id = setInterval(() => {
+      void refreshSavedTrip();
+    }, 60_000);
+    return () => clearInterval(id);
+  }, [refreshSavedTrip]);
+
+  const handleSaveTrip = useCallback(async () => {
+    if (!destinationCoordinates || !destinationLabel) return;
+    const origin =
+      (await resolveTripOrigin()) ??
+      originCoordinates ??
+      location;
+    if (!origin) return;
+
+    const originLabel =
+      tripOriginMode === 'gps'
+        ? t('trip.origin')
+        : tripOriginQuery || t('trip.origin');
+
+    const saved = await saveScheduledTrip({
+      originLabel,
+      origin,
+      destinationLabel,
+      destination: destinationCoordinates,
+      departureTimeIso: departureTime.toISOString(),
+      summary: `${originLabel} → ${destinationLabel}`,
+    });
+    await scheduledTripReminderService.scheduleNotification(saved);
+    setSavedTrip(saved);
+    setTripJustSaved(true);
+    setTripAssistMessage(t('tripAssist.tripSaved'));
+    if (hapticFeedback) {
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    }
+  }, [
+    destinationCoordinates,
+    destinationLabel,
+    resolveTripOrigin,
+    originCoordinates,
+    location,
+    tripOriginMode,
+    tripOriginQuery,
+    departureTime,
+    hapticFeedback,
+    t,
+  ]);
+
+  const handleOpenSavedTrip = useCallback(async () => {
+    const trip = savedTrip ?? (await getNextScheduledTrip());
+    if (!trip) return;
+    setSavedTrip(trip);
+    setTripJustSaved(true);
+    setTripOriginMode('custom');
+    setCustomTripOrigin(trip.origin);
+    setTripOriginQuery(trip.originLabel);
+    setDepartureTime(new Date(trip.departureTimeIso));
+    setTripAssistMessage(
+      t('tripAssist.savedTripHint', { destination: trip.destinationLabel })
+    );
+    await resolveDestination(trip.destination, trip.destinationLabel);
+  }, [savedTrip, resolveDestination, t]);
+
+  const handleRemoveSavedTrip = useCallback(async () => {
+    const trip = savedTrip ?? (await getNextScheduledTrip());
+    if (!trip) {
+      setTripJustSaved(false);
+      setSavedTrip(null);
+      return;
+    }
+    await scheduledTripReminderService.cancelTrip(trip.id);
+    setSavedTrip(null);
+    setTripJustSaved(false);
+    setTripAssistMessage(t('tripAssist.tripRemoved'));
+    if (hapticFeedback) {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    }
+  }, [savedTrip, hapticFeedback, t]);
+
+  const canSaveCurrentTrip = useMemo(
+    () =>
+      Boolean(destinationCoordinates && destinationLabel && routeOptions.length > 0) &&
+      isFutureDeparture(departureTime),
+    [destinationCoordinates, destinationLabel, routeOptions.length, departureTime]
+  );
+
+  const isCurrentTripSaved = useMemo(() => {
+    if (tripJustSaved && savedTrip) return true;
+    if (!savedTrip || !destinationLabel) return false;
+    const sameDest =
+      savedTrip.destinationLabel.trim().toLowerCase() ===
+      destinationLabel.trim().toLowerCase();
+    const sameTime =
+      Math.abs(
+        new Date(savedTrip.departureTimeIso).getTime() - departureTime.getTime()
+      ) < 60_000;
+    return sameDest && sameTime;
+  }, [tripJustSaved, savedTrip, destinationLabel, departureTime]);
+
+  const savedTripUrgent = useMemo(() => {
+    if (!savedTrip) return false;
+    const mins = minutesUntilDeparture(new Date(savedTrip.departureTimeIso));
+    return mins <= scheduledTripReminderService.leadMinutes;
+  }, [savedTrip]);
 
   const handleAbortItinerary = useCallback(() => {
     planSeqRef.current += 1;
@@ -1291,12 +1794,21 @@ export default function MapScreen() {
     setSelectedStops([]);
     setSelectedLine(null);
     setLineDetail(null);
+    setTripAssistPhase('idle');
+    setPendingDestQuery(null);
+    setTripJustSaved(false);
+    setChatActive(false);
     clearRouteNavigation();
-    const homeRegion = location
-      ? { ...location, latitudeDelta: 0.025, longitudeDelta: 0.025 }
-      : defaultMapRegion();
+    const homeRegion =
+      location && isInMontpellierServiceArea(location.latitude, location.longitude)
+        ? { ...location, latitudeDelta: 0.025, longitudeDelta: 0.025 }
+        : defaultMapRegion();
     setMapRegion(homeRegion);
-    mapRef.current?.resetToInitialView(location);
+    mapRef.current?.resetToInitialView(
+      location && isInMontpellierServiceArea(location.latitude, location.longitude)
+        ? location
+        : { ...MONTPELLIER_BOUNDS.center }
+    );
   }, [
     clearRouteNavigation,
     location,
@@ -1305,17 +1817,6 @@ export default function MapScreen() {
     setIsSearching,
     setSelectedStops,
   ]);
-
-  const handleAbortChatItinerary = useCallback(() => {
-    handleAbortItinerary();
-    const next = createInitialChatState((key) => t(key));
-    setChatState(next);
-    chatStateRef.current = next;
-    chatBusyRef.current = false;
-    if (hapticFeedback) {
-      void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    }
-  }, [handleAbortItinerary, t, hapticFeedback]);
 
   const handleCloseRouteOptions = useCallback(() => {
     handleAbortItinerary();
@@ -1331,10 +1832,8 @@ export default function MapScreen() {
     if (coords) mapRef.current?.recenter(coords);
   }, [refreshLocation, location, hapticFeedback]);
 
-  const chatMode = interactionMode === 'chat';
-
   const mapNetworkLineShapes = useMemo(() => {
-    if (chatMode || itineraryVisible) return [];
+    if (itineraryVisible) return [];
     return networkLineShapes
       .filter((line) => enabledTransportModes.includes(line.mode))
       .map((line) => ({
@@ -1345,7 +1844,6 @@ export default function MapScreen() {
         highlighted: selectedLine?.id === line.id,
       }));
   }, [
-    chatMode,
     itineraryVisible,
     networkLineShapes,
     enabledTransportModes,
@@ -1353,12 +1851,18 @@ export default function MapScreen() {
   ]);
 
   const placeProposals = useMemo((): SearchSuggestion[] => {
-    if (chatMode) {
+    if (chatActive) {
       return chatState.pendingSuggestions ?? [];
     }
-    if (destinationCoordinates) return [];
+    if (destinationCoordinates && activeSearchField !== 'origin') return [];
     return searchSuggestions;
-  }, [chatMode, chatState.pendingSuggestions, destinationCoordinates, searchSuggestions]);
+  }, [
+    chatActive,
+    chatState.pendingSuggestions,
+    destinationCoordinates,
+    activeSearchField,
+    searchSuggestions,
+  ]);
 
   const [focusedProposalIndex, setFocusedProposalIndex] = useState(0);
 
@@ -1409,13 +1913,20 @@ export default function MapScreen() {
       if (hapticFeedback) {
         void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
       }
-      if (chatMode) {
-        onChatPlaceSelect(place);
-      } else {
-        handleSuggestionSelect(place);
+      if (chatActive) {
+        void onChatPlaceSelect(place);
+        return;
       }
+      handleSuggestionSelect(place, activeSearchField);
     },
-    [placeProposals, chatMode, onChatPlaceSelect, handleSuggestionSelect, hapticFeedback]
+    [
+      placeProposals,
+      chatActive,
+      onChatPlaceSelect,
+      handleSuggestionSelect,
+      hapticFeedback,
+      activeSearchField,
+    ]
   );
 
   const handlePrevPlaceProposal = useCallback(() => {
@@ -1434,72 +1945,36 @@ export default function MapScreen() {
     setFocusedProposalIndex((i) => (i + 1) % placeProposals.length);
   }, [placeProposals.length, hapticFeedback]);
 
-  useEffect(() => {
-    if (!chatMode || navigationActive || isPlanningRoute) return;
-    if (chatState.pendingSuggestions && chatState.pendingSuggestions.length > 0) {
-      return;
-    }
-
-    if (chatState.destination) {
-      setDestinationCoordinates(chatState.destination);
-      setDestinationLabel(chatState.destinationLabel ?? null);
-      if (chatState.origin) {
-        setOriginCoordinates(chatState.origin);
-        mapRef.current?.fitRoute([chatState.origin, chatState.destination]);
-      } else {
-        mapRef.current?.recenter(chatState.destination);
-      }
-    }
-  }, [
-    chatMode,
-    navigationActive,
-    isPlanningRoute,
-    chatState.destination,
-    chatState.destinationLabel,
-    chatState.origin,
-    chatState.pendingSuggestions,
-    setDestinationCoordinates,
-    setDestinationLabel,
-    setOriginCoordinates,
-  ]);
-
-  const showChatCloseItinerary =
-    chatMode &&
-    (navigationActive ||
-      isPlanningRoute ||
-      routeOptions.length > 0 ||
-      !!destinationCoordinates ||
-      chatState.phase === 'planning' ||
-      chatState.phase === 'navigating' ||
-      chatState.phase === 'done');
-  const showRouteOptions = routeOptions.length > 0 && !navigationActive && !chatMode;
+  const showRouteOptions = routeOptions.length > 0 && !navigationActive;
   const showNoRouteFound =
-    !chatMode &&
     routeSearchSettled &&
     !!destinationCoordinates &&
     !isPlanningRoute &&
     routeOptions.length === 0 &&
     !navigationActive;
-  const bottomStackHeight = chatMode
-    ? navigationActive
-      ? 300
-      : 490
-    : navigationActive
-      ? 400
+  const bottomStackHeight = navigationActive
+    ? 150
+    : chatActive
+      ? 420
       : showRouteOptions || isPlanningRoute || showNoRouteFound
-        ? 340
-        : 72;
-  const floatingControlsBottom =
-    insets.bottom +
-    bottomStackHeight +
-    spacing.md +
-    (!chatMode && navigationActive ? spacing.xl : 0);
+        ? 360
+        : 130;
   const mapBottomClearance = bottomStackHeight + insets.bottom + spacing.lg;
   const stopInfoContentTop = insets.top + 56 + spacing.sm;
   const vignette = useMapVignetteLayout(mapBottomClearance);
+  const navigationMapPadding = useMemo(
+    () =>
+      navigationActive
+        ? {
+            top: insets.top + 56,
+            right: spacing.lg,
+            bottom: mapBottomClearance,
+            left: spacing.lg,
+          }
+        : undefined,
+    [navigationActive, insets.top, mapBottomClearance]
+  );
   const { weather: mapWeather, loading: mapWeatherLoading } = useMapWeather(mapRegion);
-  const mapInteractive =
-    !chatMode || placeProposals.length > 0 || navigationActive;
   const proposalArrowTop = useMemo(
     () => insets.top + (Dimensions.get('window').height - mapBottomClearance - insets.top) * 0.42,
     [insets.top, mapBottomClearance]
@@ -1507,16 +1982,17 @@ export default function MapScreen() {
 
   return (
     <View style={styles.container}>
-      <View style={styles.mapLayer} pointerEvents={mapInteractive ? 'auto' : 'none'}>
+      <View style={styles.mapLayer} pointerEvents="auto">
         <TransitMap
           ref={mapRef}
           userLocation={
-            walkNavigationActive
+            navigationActive
               ? location ?? currentNavigationStep?.from ?? null
               : location
           }
           userHeading={walkNavigationActive ? userHeading : null}
-          showNavigationPuck={!!walkNavigationActive}
+          showNavigationPuck={!!navigationActive}
+          mapPadding={navigationMapPadding}
           origin={originCoordinates}
           destination={destinationCoordinates}
           routeCoordinates={routeMapSegments.length > 0 ? undefined : activeMapPath}
@@ -1538,17 +2014,17 @@ export default function MapScreen() {
           lineCoordinates={lineCoordinates}
           lineColor={selectedLine?.color}
           networkLineShapes={mapNetworkLineShapes}
-          stopClusters={chatMode && !itineraryVisible ? [] : stopClusters}
-          pois={chatMode || !showPois ? [] : mapPois}
+          stopClusters={stopClusters}
+          pois={showPois ? mapPois : []}
           clearRadius={vignette.clearRadius}
           vignette={vignette}
           selectedStopIds={selectedStopIds}
-          onStopClusterPress={chatMode && !itineraryVisible ? undefined : handleStopClusterPress}
+          onStopClusterPress={handleStopClusterPress}
           onRegionChangeComplete={handleMapRegionChange}
         />
       </View>
 
-      {!chatMode && selectedStops.length > 0 ? (
+      {selectedStops.length > 0 ? (
         <StopInfoCard
           stops={selectedStops}
           departuresByStop={departuresByStop}
@@ -1562,25 +2038,22 @@ export default function MapScreen() {
         />
       ) : null}
 
-      <AppMenuButton
+      <MapTopBar
         top={insets.top + spacing.sm}
-        onRecenter={chatMode ? undefined : handleRecenter}
-        onOpenLayers={chatMode ? undefined : () => setLayersSheetOpen(true)}
-        layersActive={layersActive}
-      />
-
-      <MapWeatherWidget
-        top={insets.top + spacing.sm}
-        left={spacing.md}
         weather={mapWeather}
-        loading={mapWeatherLoading}
-      />
-
-      <MapModeToggle
-        mode={interactionMode}
-        onChange={handleInteractionModeChange}
-        top={insets.top + spacing.sm}
-        left={spacing.md + MAP_WEATHER_WIDGET_SIZE + spacing.sm}
+        weatherLoading={mapWeatherLoading}
+        onRecenter={handleRecenter}
+        onOpenLayers={() => setLayersSheetOpen(true)}
+        layersActive={layersActive}
+        savedTripLabel={
+          savedTrip
+            ? t('tripAssist.savedTripHint', { destination: savedTrip.destinationLabel })
+            : null
+        }
+        savedTripUrgent={savedTripUrgent}
+        onOpenSavedTrip={savedTrip ? handleOpenSavedTrip : undefined}
+        onRemoveSavedTrip={savedTrip ? handleRemoveSavedTrip : undefined}
+        removeSavedTripLabel={t('tripAssist.removeSavedTrip')}
       />
 
       {placeProposals.length > 1 ? (
@@ -1592,17 +2065,9 @@ export default function MapScreen() {
         />
       ) : null}
 
-      {!chatMode ? (
-        <MapFloatingControls
-          bottom={floatingControlsBottom}
-          onZoomIn={() => mapRef.current?.zoomIn()}
-          onZoomOut={() => mapRef.current?.zoomOut()}
-        />
-      ) : null}
-
       <MapLayersSheet
-        visible={layersSheetOpen && !chatMode}
-        top={insets.top + 48 + spacing.sm}
+        visible={layersSheetOpen}
+        top={insets.top + spacing.sm + 56}
         mapRegion={mapRegion}
         selectedLineId={selectedLine?.id ?? null}
         showStops={showStops}
@@ -1622,71 +2087,79 @@ export default function MapScreen() {
           style={[styles.bottomContent, { paddingBottom: insets.bottom + spacing.sm }]}
           pointerEvents="box-none"
         >
-          {chatMode ? (
-            navigationActive && currentNavigationStep ? (
-              <InAppNavigationCard
-                step={currentNavigationStep}
-                steps={navigationSteps}
-                stepIndex={navigationStepIndex}
-                totalSteps={navigationSteps.length}
-                userLocation={location}
-                onStop={() => {
-                  handleAbortChatItinerary();
-                  if (hapticFeedback) {
-                    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                  }
-                }}
-              />
-            ) : (
-              <ChatModePanel
-                state={chatState}
-                onSend={onChatSend}
-                onQuickReply={onChatQuickReply}
-                showCloseItinerary={showChatCloseItinerary}
-                onCloseItinerary={handleAbortChatItinerary}
-                bottomInset={0}
-              />
-            )
+          {navigationActive && currentNavigationStep ? (
+            <InAppNavigationCard
+              step={currentNavigationStep}
+              stepIndex={navigationStepIndex}
+              totalSteps={navigationSteps.length}
+              userLocation={location}
+              onStop={() => {
+                handleAbortItinerary();
+                if (hapticFeedback) Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+              }}
+            />
+          ) : null}
+
+          {showRouteOptions && destinationLabel ? (
+            <RouteOptionsSheet
+              routes={routeOptions}
+              destinationLabel={destinationLabel}
+              selectedIndex={previewRouteIndex}
+              onPreview={handlePreviewRoute}
+              onStart={handleStartRoute}
+              onClose={() => {
+                handleCloseRouteOptions();
+                if (chatActive) closeAssistChat();
+              }}
+              canSaveTrip={canSaveCurrentTrip || isCurrentTripSaved}
+              onSaveTrip={handleSaveTrip}
+              onRemoveSavedTrip={handleRemoveSavedTrip}
+              tripSaved={isCurrentTripSaved}
+            />
+          ) : showNoRouteFound && !chatActive ? (
+            <NoRouteFoundCard
+              destinationLabel={destinationLabel}
+              onClose={handleDismissNoRoute}
+            />
+          ) : isPlanningRoute && !chatActive ? (
+            <PlanningRouteCard />
+          ) : null}
+
+          {chatActive ? (
+            <ChatModePanel
+              state={chatState}
+              onSend={(text) => {
+                void onChatSend(text);
+              }}
+              onQuickReply={(id) => {
+                void onChatQuickReply(id);
+              }}
+              onClose={() => {
+                if (showRouteOptions || navigationActive) {
+                  handleAbortItinerary();
+                }
+                closeAssistChat();
+              }}
+              bottomInset={insets.bottom}
+            />
           ) : (
-            <>
-              {navigationActive && currentNavigationStep ? (
-                <InAppNavigationCard
-                  step={currentNavigationStep}
-                  steps={navigationSteps}
-                  stepIndex={navigationStepIndex}
-                  totalSteps={navigationSteps.length}
-                  userLocation={location}
-                  onStop={() => {
-                    handleAbortItinerary();
-                    if (hapticFeedback) Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                  }}
-                />
-              ) : null}
-
-              {showRouteOptions && destinationLabel ? (
-                <RouteOptionsSheet
-                  routes={routeOptions}
-                  destinationLabel={destinationLabel}
-                  selectedIndex={previewRouteIndex}
-                  onPreview={handlePreviewRoute}
-                  onStart={handleStartRoute}
-                  onClose={handleCloseRouteOptions}
-                />
-              ) : showNoRouteFound ? (
-                <NoRouteFoundCard
-                  destinationLabel={destinationLabel}
-                  onClose={handleDismissNoRoute}
-                />
-              ) : isPlanningRoute ? (
-                <PlanningRouteCard />
-              ) : null}
-
-              <SearchBar
-                value={searchQuery}
-                onChangeText={handleChangeText}
-                isLoading={isSearching || isPlanningRoute}
-              />
-            </>
+            <SearchBar
+              value={searchQuery}
+              onChangeText={handleChangeText}
+              onSubmitSearch={handleSubmitSearch}
+              isLoading={isSearching || isPlanningRoute}
+              originValue={tripOriginMode === 'gps' ? '' : tripOriginQuery}
+              onOriginChange={handleOriginChange}
+              onOriginFocus={() => setActiveSearchField('origin')}
+              onDestinationFocus={() => setActiveSearchField('destination')}
+              usingMyLocation={tripOriginMode === 'gps'}
+              onUseMyLocation={handleUseMyLocation}
+              departureLabel={formatDepartureLabel(departureTime, (key, opts) =>
+                t(key, opts as Record<string, string | number> | undefined)
+              )}
+              departureTime={departureTime}
+              onDepartureChange={handleDepartureChange}
+            />
           )}
         </View>
       </KeyboardAvoidingView>

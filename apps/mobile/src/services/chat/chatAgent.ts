@@ -1,12 +1,12 @@
 import { searchPlacesApi } from '../api/transitApi';
 import { mergeSearchSuggestions, searchPlacesLocally } from '../../utils/localPlaceSearch';
 import type { Coordinates, SearchSuggestion, Stop } from '../../stores/transitStore';
+import { parseTripIntent, type TripIntent } from './tripIntent';
 import {
   createMessageId,
   isCurrentLocationPhrase,
   parseDepartureWhen,
   type ChatMessage,
-  type ChatPhase,
   type ChatQuickReply,
   type ChatSessionState,
   type ChatTripRequest,
@@ -39,6 +39,13 @@ const ORIGIN_REPLIES: ChatQuickReply[] = [
   { id: 'origin-here', label: 'Ma position' },
 ];
 
+type ChatCtx = {
+  userLocation: Coordinates | null;
+  mapStops: Stop[];
+  t: (key: string, opts?: Record<string, string | number>) => string;
+  resolveUserLocation: () => Promise<Coordinates | null>;
+};
+
 export function createInitialChatState(t: (key: string) => string): ChatSessionState {
   return {
     phase: 'awaiting_destination',
@@ -47,14 +54,12 @@ export function createInitialChatState(t: (key: string) => string): ChatSessionS
   };
 }
 
-/** Même résolution multi-résultats que la barre de recherche carte (pas de choix auto du plus proche). */
 async function resolvePlaces(
   query: string,
   userLocation: Coordinates | null,
   mapStops: Stop[]
 ): Promise<SearchSuggestion[]> {
   const local = searchPlacesLocally(query, mapStops);
-
   try {
     const apiPlaces = await searchPlacesApi(query, {
       scope: 'local',
@@ -73,15 +78,292 @@ export interface ChatTurnResult {
   tripRequest?: ChatTripRequest;
 }
 
+function finalizeTrip(state: ChatSessionState, departure: Date, ctx: ChatCtx): ChatTurnResult {
+  if (!state.destination || !state.origin || !state.destinationLabel) {
+    return {
+      state: {
+        ...state,
+        busy: false,
+        messages: [...state.messages, assistant(ctx.t('chat.errorGeneric'))],
+      },
+    };
+  }
+
+  const trip: ChatTripRequest = {
+    destination: state.destination,
+    destinationLabel: state.destinationLabel,
+    origin: state.origin,
+    originLabel: state.originLabel ?? ctx.t('chat.myLocation'),
+    departureTime: departure,
+  };
+
+  const timeLabel = departure.toLocaleTimeString('fr-FR', {
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+
+  return {
+    state: {
+      ...state,
+      busy: false,
+      departureTime: departure,
+      pendingDestQuery: undefined,
+      phase: 'planning',
+      messages: [
+        ...state.messages,
+        assistant(
+          ctx.t('chat.planning', {
+            time: timeLabel,
+            destination: state.destinationLabel,
+          })
+        ),
+      ],
+    },
+    tripRequest: trip,
+  };
+}
+
+async function resolveDestinationPlaces(
+  state: ChatSessionState,
+  destQuery: string,
+  ctx: ChatCtx
+): Promise<ChatTurnResult> {
+  const places = await resolvePlaces(destQuery, ctx.userLocation, ctx.mapStops);
+
+  if (places.length === 0) {
+    return {
+      state: {
+        ...state,
+        busy: false,
+        phase: 'awaiting_destination',
+        messages: [...state.messages, assistant(ctx.t('chat.destinationNotFound'))],
+      },
+    };
+  }
+
+  if (places.length === 1) {
+    const place = places[0];
+    const label = place.displayName || place.name;
+    const withDest: ChatSessionState = {
+      ...state,
+      destination: place.coordinates,
+      destinationLabel: label,
+      pendingDestQuery: undefined,
+      pendingSuggestions: undefined,
+      messages: [
+        ...state.messages,
+        assistant(ctx.t('chat.destinationConfirmed', { destination: label })),
+      ],
+    };
+
+    if (!withDest.origin) {
+      return {
+        state: {
+          ...withDest,
+          phase: 'awaiting_origin',
+          busy: false,
+          messages: [
+            ...withDest.messages,
+            assistant(ctx.t('chat.askOrigin', { destination: label }), {
+              quickReplies: ORIGIN_REPLIES,
+            }),
+          ],
+        },
+      };
+    }
+
+    if (withDest.departureTime) {
+      return finalizeTrip(withDest, withDest.departureTime, ctx);
+    }
+
+    return {
+      state: {
+        ...withDest,
+        phase: 'awaiting_when',
+        busy: false,
+        messages: [
+          ...withDest.messages,
+          assistant(ctx.t('chat.askWhen'), { quickReplies: WHEN_REPLIES }),
+        ],
+      },
+    };
+  }
+
+  return {
+    state: {
+      ...state,
+      busy: false,
+      phase: 'awaiting_destination_choice',
+      pendingSuggestions: places,
+      messages: [
+        ...state.messages,
+        assistant(ctx.t('chat.chooseDestination'), { placeSuggestions: places }),
+      ],
+    },
+  };
+}
+
+async function resolveOriginPlaces(
+  state: ChatSessionState,
+  originQuery: string,
+  ctx: ChatCtx,
+  pendingDestQuery?: string
+): Promise<ChatTurnResult> {
+  const places = await resolvePlaces(originQuery, ctx.userLocation, ctx.mapStops);
+
+  if (places.length === 0) {
+    return {
+      state: {
+        ...state,
+        busy: false,
+        phase: 'awaiting_origin',
+        pendingDestQuery: pendingDestQuery ?? state.pendingDestQuery,
+        messages: [
+          ...state.messages,
+          assistant(ctx.t('chat.originNotFound'), { quickReplies: ORIGIN_REPLIES }),
+        ],
+      },
+    };
+  }
+
+  if (places.length === 1) {
+    const place = places[0];
+    const label = place.displayName || place.name;
+    const withOrigin: ChatSessionState = {
+      ...state,
+      origin: place.coordinates,
+      originLabel: label,
+      pendingSuggestions: undefined,
+      pendingDestQuery: pendingDestQuery ?? state.pendingDestQuery,
+      messages: [
+        ...state.messages,
+        assistant(ctx.t('chat.originConfirmed', { origin: label })),
+      ],
+    };
+
+    const destQuery = withOrigin.pendingDestQuery;
+    if (destQuery && !withOrigin.destination) {
+      return resolveDestinationPlaces(
+        { ...withOrigin, pendingDestQuery: undefined },
+        destQuery,
+        ctx
+      );
+    }
+
+    if (withOrigin.destination && withOrigin.departureTime) {
+      return finalizeTrip(withOrigin, withOrigin.departureTime, ctx);
+    }
+
+    if (withOrigin.destination) {
+      return {
+        state: {
+          ...withOrigin,
+          phase: 'awaiting_when',
+          busy: false,
+          messages: [
+            ...withOrigin.messages,
+            assistant(ctx.t('chat.askWhen'), { quickReplies: WHEN_REPLIES }),
+          ],
+        },
+      };
+    }
+
+    return {
+      state: {
+        ...withOrigin,
+        phase: 'awaiting_destination',
+        busy: false,
+        messages: [...withOrigin.messages, assistant(ctx.t('tripAssist.askDestination'))],
+      },
+    };
+  }
+
+  return {
+    state: {
+      ...state,
+      busy: false,
+      phase: 'awaiting_origin',
+      pendingSuggestions: places,
+      pendingDestQuery: pendingDestQuery ?? state.pendingDestQuery,
+      messages: [
+        ...state.messages,
+        assistant(ctx.t('chat.chooseOrigin'), { placeSuggestions: places }),
+      ],
+    },
+  };
+}
+
+async function handleStructuredTrip(
+  state: ChatSessionState,
+  intent: TripIntent,
+  ctx: ChatCtx
+): Promise<ChatTurnResult> {
+  let next: ChatSessionState = {
+    ...state,
+    departureTime: intent.departureTime ?? state.departureTime,
+    pendingDestQuery: intent.destinationQuery ?? state.pendingDestQuery,
+  };
+
+  if (intent.departureTime) {
+    const timeLabel = intent.departureTime.toLocaleTimeString('fr-FR', {
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+    next = {
+      ...next,
+      messages: [
+        ...next.messages,
+        assistant(ctx.t('chat.whenNoted', { time: timeLabel })),
+      ],
+    };
+  }
+
+  if (intent.originQuery) {
+    return resolveOriginPlaces(next, intent.originQuery, ctx, intent.destinationQuery);
+  }
+
+  if (intent.useCurrentLocationOrigin) {
+    const origin = ctx.userLocation ?? (await ctx.resolveUserLocation());
+    if (!origin) {
+      return {
+        state: {
+          ...next,
+          busy: false,
+          phase: 'awaiting_origin',
+          messages: [...next.messages, assistant(ctx.t('chat.locationNeeded'))],
+        },
+      };
+    }
+    next = {
+      ...next,
+      origin,
+      originLabel: ctx.t('chat.myLocation'),
+      messages: [...next.messages, assistant(ctx.t('chat.originConfirmedHere'))],
+    };
+  }
+
+  if (intent.destinationQuery) {
+    return resolveDestinationPlaces(
+      { ...next, pendingDestQuery: undefined },
+      intent.destinationQuery,
+      ctx
+    );
+  }
+
+  return {
+    state: {
+      ...next,
+      busy: false,
+      phase: 'awaiting_destination',
+      messages: [...next.messages, assistant(ctx.t('tripAssist.askDestination'))],
+    },
+  };
+}
+
 export async function handleChatUserText(
   state: ChatSessionState,
   text: string,
-  ctx: {
-    userLocation: Coordinates | null;
-    mapStops: Stop[];
-    t: (key: string, opts?: Record<string, string | number>) => string;
-    resolveUserLocation: () => Promise<Coordinates | null>;
-  }
+  ctx: ChatCtx
 ): Promise<ChatTurnResult> {
   const trimmed = text.trim();
   if (!trimmed || state.busy) return { state };
@@ -114,10 +396,7 @@ export async function handleChatUserText(
           state: {
             ...withUser,
             busy: false,
-            messages: [
-              ...withUser.messages,
-              assistant(ctx.t('chat.busyNavigating')),
-            ],
+            messages: [...withUser.messages, assistant(ctx.t('chat.busyNavigating'))],
           },
         };
 
@@ -139,17 +418,11 @@ export async function handleChatUserText(
 export async function handleChatQuickReply(
   state: ChatSessionState,
   replyId: string,
-  ctx: {
-    userLocation: Coordinates | null;
-    mapStops: Stop[];
-    t: (key: string, opts?: Record<string, string | number>) => string;
-    resolveUserLocation: () => Promise<Coordinates | null>;
-  }
+  ctx: ChatCtx
 ): Promise<ChatTurnResult> {
   if (replyId === 'origin-here') {
     return handleChatUserText(state, ctx.t('chat.myLocation'), ctx);
   }
-
   if (replyId === 'when-now') {
     return handleChatUserText(state, ctx.t('chat.now'), ctx);
   }
@@ -162,20 +435,16 @@ export async function handleChatQuickReply(
   if (replyId === 'when-1h') {
     return handleChatUserText(state, ctx.t('chat.inHours', { hours: 1 }), ctx);
   }
-
   if (replyId === 'restart') {
     return { state: createInitialChatState(ctx.t) };
   }
-
   return { state };
 }
 
 export function handleChatPlaceSelect(
   state: ChatSessionState,
   place: SearchSuggestion,
-  ctx: {
-    t: (key: string, opts?: Record<string, string | number>) => string;
-  },
+  ctx: { t: (key: string, opts?: Record<string, string | number>) => string },
   options: { appendUserMessage?: boolean } = { appendUserMessage: true }
 ): ChatTurnResult {
   const label = place.displayName || place.name;
@@ -185,51 +454,146 @@ export function handleChatPlaceSelect(
       : [...state.messages, user(label)];
 
   if (state.phase === 'awaiting_destination_choice' || state.phase === 'awaiting_destination') {
-    const next: ChatSessionState = {
+    const withDest: ChatSessionState = {
       ...state,
       destination: place.coordinates,
       destinationLabel: label,
       pendingSuggestions: undefined,
-      phase: 'awaiting_origin',
+      pendingDestQuery: undefined,
       busy: false,
       messages: [
         ...baseMessages,
-        assistant(ctx.t('chat.askOrigin', { destination: label }), {
-          quickReplies: ORIGIN_REPLIES,
-        }),
+        assistant(ctx.t('chat.destinationConfirmed', { destination: label })),
       ],
     };
-    return { state: next };
+
+    if (state.origin) {
+      if (state.departureTime) {
+        return finalizeTrip(withDest, state.departureTime, ctx as ChatCtx);
+      }
+      return {
+        state: {
+          ...withDest,
+          phase: 'awaiting_when',
+          messages: [
+            ...withDest.messages,
+            assistant(ctx.t('chat.askWhen'), { quickReplies: WHEN_REPLIES }),
+          ],
+        },
+      };
+    }
+
+    return {
+      state: {
+        ...withDest,
+        phase: 'awaiting_origin',
+        messages: [
+          ...withDest.messages,
+          assistant(ctx.t('chat.askOrigin', { destination: label }), {
+            quickReplies: ORIGIN_REPLIES,
+          }),
+        ],
+      },
+    };
   }
 
   if (state.phase === 'awaiting_origin') {
-    const next: ChatSessionState = {
+    const withOrigin: ChatSessionState = {
       ...state,
       origin: place.coordinates,
       originLabel: label,
       pendingSuggestions: undefined,
-      phase: 'awaiting_when',
       busy: false,
       messages: [
         ...baseMessages,
-        assistant(ctx.t('chat.askWhen'), { quickReplies: WHEN_REPLIES }),
+        assistant(ctx.t('chat.originConfirmed', { origin: label })),
       ],
     };
-    return { state: next };
+
+    // Note: async continuation for pendingDestQuery is handled by caller via applyOriginThenContinue
+    if (state.pendingDestQuery) {
+      return {
+        state: {
+          ...withOrigin,
+          phase: 'awaiting_destination',
+        },
+      };
+    }
+
+    if (withOrigin.destination && withOrigin.departureTime) {
+      return finalizeTrip(withOrigin, withOrigin.departureTime, ctx as ChatCtx);
+    }
+
+    if (withOrigin.destination) {
+      return {
+        state: {
+          ...withOrigin,
+          phase: 'awaiting_when',
+          messages: [
+            ...withOrigin.messages,
+            assistant(ctx.t('chat.askWhen'), { quickReplies: WHEN_REPLIES }),
+          ],
+        },
+      };
+    }
+
+    return {
+      state: {
+        ...withOrigin,
+        phase: 'awaiting_when',
+        messages: [
+          ...withOrigin.messages,
+          assistant(ctx.t('chat.askWhen'), { quickReplies: WHEN_REPLIES }),
+        ],
+      },
+    };
   }
 
   return { state };
 }
 
+/** Après sélection d’origine sur la carte : résout la destination en attente si besoin. */
+export async function continueAfterOriginSelect(
+  state: ChatSessionState,
+  ctx: ChatCtx
+): Promise<ChatTurnResult> {
+  if (state.pendingDestQuery && state.origin && !state.destination) {
+    const query = state.pendingDestQuery;
+    return resolveDestinationPlaces(
+      { ...state, pendingDestQuery: undefined, busy: true },
+      query,
+      ctx
+    );
+  }
+  if (state.destination && state.origin && state.departureTime) {
+    return finalizeTrip(state, state.departureTime, ctx);
+  }
+  if (state.destination && state.origin && !state.departureTime) {
+    return {
+      state: {
+        ...state,
+        phase: 'awaiting_when',
+        busy: false,
+        messages: [
+          ...state.messages,
+          assistant(ctx.t('chat.askWhen'), { quickReplies: WHEN_REPLIES }),
+        ],
+      },
+    };
+  }
+  return { state: { ...state, busy: false } };
+}
+
 async function handleDestination(
   state: ChatSessionState,
   text: string,
-  ctx: {
-    userLocation: Coordinates | null;
-    mapStops: Stop[];
-    t: (key: string, opts?: Record<string, string | number>) => string;
-  }
+  ctx: ChatCtx
 ): Promise<ChatTurnResult> {
+  const intent = parseTripIntent(text);
+  if (intent.isStructured) {
+    return handleStructuredTrip(state, intent, ctx);
+  }
+
   const places = await resolvePlaces(text, ctx.userLocation, ctx.mapStops);
 
   if (places.length === 0) {
@@ -275,9 +639,7 @@ async function handleDestination(
       pendingSuggestions: places,
       messages: [
         ...state.messages,
-        assistant(ctx.t('chat.chooseDestination'), {
-          placeSuggestions: places,
-        }),
+        assistant(ctx.t('chat.chooseDestination'), { placeSuggestions: places }),
       ],
     },
   };
@@ -286,11 +648,7 @@ async function handleDestination(
 async function handleDestinationChoice(
   state: ChatSessionState,
   text: string,
-  ctx: {
-    userLocation: Coordinates | null;
-    mapStops: Stop[];
-    t: (key: string, opts?: Record<string, string | number>) => string;
-  }
+  ctx: ChatCtx
 ): Promise<ChatTurnResult> {
   const pending = state.pendingSuggestions ?? [];
   const normalized = text.trim().toLowerCase();
@@ -324,14 +682,10 @@ async function handleDestinationChoice(
 async function handleOrigin(
   state: ChatSessionState,
   text: string,
-  ctx: {
-    userLocation: Coordinates | null;
-    mapStops: Stop[];
-    t: (key: string, opts?: Record<string, string | number>) => string;
-    resolveUserLocation: () => Promise<Coordinates | null>;
-  }
+  ctx: ChatCtx
 ): Promise<ChatTurnResult> {
   const pending = state.pendingSuggestions ?? [];
+
   if (pending.length > 0) {
     const normalized = text.trim().toLowerCase();
     const numberMatch =
@@ -340,9 +694,13 @@ async function handleOrigin(
     if (numberMatch) {
       const index = parseInt(numberMatch[1], 10) - 1;
       if (index >= 0 && index < pending.length) {
-        return handleChatPlaceSelect({ ...state, busy: false }, pending[index], ctx, {
+        const selected = handleChatPlaceSelect({ ...state, busy: false }, pending[index], ctx, {
           appendUserMessage: false,
         });
+        if (selected.state.pendingDestQuery && selected.state.origin) {
+          return continueAfterOriginSelect(selected.state, ctx);
+        }
+        return selected;
       }
     }
     const match = pending.find(
@@ -352,9 +710,13 @@ async function handleOrigin(
         p.name.toLowerCase().includes(normalized)
     );
     if (match) {
-      return handleChatPlaceSelect({ ...state, busy: false }, match, ctx, {
+      const selected = handleChatPlaceSelect({ ...state, busy: false }, match, ctx, {
         appendUserMessage: false,
       });
+      if (selected.state.pendingDestQuery && selected.state.origin) {
+        return continueAfterOriginSelect(selected.state, ctx);
+      }
+      return selected;
     }
   }
 
@@ -369,75 +731,39 @@ async function handleOrigin(
         },
       };
     }
-    return {
-      state: {
-        ...state,
-        busy: false,
-        origin,
-        originLabel: ctx.t('chat.myLocation'),
-        phase: 'awaiting_when',
-        messages: [
-          ...state.messages,
-          assistant(ctx.t('chat.originConfirmedHere')),
-          assistant(ctx.t('chat.askWhen'), { quickReplies: WHEN_REPLIES }),
-        ],
-      },
-    };
-  }
-
-  const places = await resolvePlaces(text, ctx.userLocation, ctx.mapStops);
-  if (places.length === 0) {
-    return {
-      state: {
-        ...state,
-        busy: false,
-        messages: [
-          ...state.messages,
-          assistant(ctx.t('chat.originNotFound'), { quickReplies: ORIGIN_REPLIES }),
-        ],
-      },
-    };
-  }
-
-  if (places.length === 1) {
-    const place = places[0];
-    return {
-      state: {
-        ...state,
-        busy: false,
-        origin: place.coordinates,
-        originLabel: place.displayName || place.name,
-        phase: 'awaiting_when',
-        messages: [
-          ...state.messages,
-          assistant(
-            ctx.t('chat.originConfirmed', { origin: place.displayName || place.name })
-          ),
-          assistant(ctx.t('chat.askWhen'), { quickReplies: WHEN_REPLIES }),
-        ],
-      },
-    };
-  }
-
-  return {
-    state: {
+    const withOrigin: ChatSessionState = {
       ...state,
       busy: false,
-      pendingSuggestions: places,
-      messages: [
-        ...state.messages,
-        assistant(ctx.t('chat.chooseOrigin'), { placeSuggestions: places }),
-      ],
-    },
-  };
+      origin,
+      originLabel: ctx.t('chat.myLocation'),
+      pendingSuggestions: undefined,
+      messages: [...state.messages, assistant(ctx.t('chat.originConfirmedHere'))],
+    };
+    if (withOrigin.pendingDestQuery) {
+      return continueAfterOriginSelect(withOrigin, ctx);
+    }
+    if (withOrigin.destination && withOrigin.departureTime) {
+      return finalizeTrip(withOrigin, withOrigin.departureTime, ctx);
+    }
+    return {
+      state: {
+        ...withOrigin,
+        phase: 'awaiting_when',
+        messages: [
+          ...withOrigin.messages,
+          assistant(ctx.t('chat.askWhen'), { quickReplies: WHEN_REPLIES }),
+        ],
+      },
+    };
+  }
+
+  return resolveOriginPlaces(state, text, ctx, state.pendingDestQuery);
 }
 
 async function handleWhen(
   state: ChatSessionState,
   text: string,
-  ctx: {
-    t: (key: string, opts?: Record<string, string | number>) => string;
-  }
+  ctx: ChatCtx
 ): Promise<ChatTurnResult> {
   let departure = parseDepartureWhen(text);
 
@@ -465,44 +791,7 @@ async function handleWhen(
     };
   }
 
-  if (!state.destination || !state.origin || !state.destinationLabel) {
-    return {
-      state: {
-        ...createInitialChatState(ctx.t),
-        messages: [
-          ...state.messages,
-          assistant(ctx.t('chat.errorGeneric')),
-        ],
-      },
-    };
-  }
-
-  const trip: ChatTripRequest = {
-    destination: state.destination,
-    destinationLabel: state.destinationLabel,
-    origin: state.origin,
-    originLabel: state.originLabel ?? ctx.t('chat.myLocation'),
-    departureTime: departure,
-  };
-
-  const timeLabel = departure.toLocaleTimeString('fr-FR', {
-    hour: '2-digit',
-    minute: '2-digit',
-  });
-
-  return {
-    state: {
-      ...state,
-      busy: false,
-      departureTime: departure,
-      phase: 'planning',
-      messages: [
-        ...state.messages,
-        assistant(ctx.t('chat.planning', { time: timeLabel, destination: state.destinationLabel })),
-      ],
-    },
-    tripRequest: trip,
-  };
+  return finalizeTrip(state, departure, ctx);
 }
 
 export function chatPhaseAfterRoute(
@@ -528,7 +817,7 @@ export function chatPhaseAfterRoute(
 
   return {
     ...state,
-    phase: 'navigating',
+    phase: 'done',
     busy: false,
     messages: [...state.messages, assistant(summary)],
   };
@@ -541,7 +830,6 @@ export function appendNavigationGuidance(
   return setNavigationGuidance(state, text);
 }
 
-/** Remplace l’étape affichée : une seule consigne de guidage à la fois. */
 export function setNavigationGuidance(
   state: ChatSessionState,
   text: string
@@ -558,5 +846,3 @@ export function setNavigationGuidance(
     messages: [...withoutSteps, assistant(text, { kind: 'nav-step' })],
   };
 }
-
-export type { ChatPhase };

@@ -7,16 +7,25 @@ import {
   Pressable,
   ScrollView,
   ActivityIndicator,
+  Platform,
 } from 'react-native';
+import { BlurView } from 'expo-blur';
 import { Ionicons } from '@expo/vector-icons';
 import { useTranslation } from 'react-i18next';
 import * as Haptics from 'expo-haptics';
 import type { Region } from 'react-native-maps';
-import { MapGlassBackground, mapGlassSurfaceStyles } from './MapGlassSurface';
+import {
+  MAP_CHROME_BORDER,
+  mapChromeText,
+  mapGlassSurfaceStyles,
+} from './MapGlassSurface';
 import { colors, radius, spacing, typography } from '../theme';
 import type { TransitLine } from '../stores/transitStore';
 import { listLinesApi } from '../services/api/transitApi';
 import { isMapRegionInServiceArea, regionToBbox } from '../utils/mapRegion';
+
+/** Même opacité que les bulles haut / bas. */
+const LAYERS_PANEL_TINT = 'rgba(12, 16, 24, 0.50)';
 
 interface MapLayersSheetProps {
   visible: boolean;
@@ -53,7 +62,7 @@ function LayerChip({
       <Ionicons
         name={icon}
         size={13}
-        color={active ? colors.accent : colors.textSecondary}
+        color={active ? mapChromeText.accent : mapChromeText.secondary}
       />
       <Text style={[styles.layerChipText, active && styles.layerChipTextActive]}>{label}</Text>
     </Pressable>
@@ -114,16 +123,21 @@ export function MapLayersSheet({
       <Pressable style={styles.backdrop} onPress={onClose}>
         <View style={[styles.anchor, { paddingTop: top }]} pointerEvents="box-none">
           <Pressable style={styles.wrapper} onPress={(e) => e.stopPropagation()}>
-            <View style={[mapGlassSurfaceStyles.panel, styles.sheet]}>
-              <MapGlassBackground />
+            <View style={[mapGlassSurfaceStyles.mapChromePanel, styles.sheet]}>
+              <View style={styles.glassClip} pointerEvents="none">
+                {Platform.OS === 'ios' ? (
+                  <BlurView intensity={36} tint="dark" style={StyleSheet.absoluteFill} />
+                ) : null}
+                <View style={[StyleSheet.absoluteFill, { backgroundColor: LAYERS_PANEL_TINT }]} />
+              </View>
 
               <View style={styles.header}>
                 <View style={styles.headerMain}>
-                  <Ionicons name="layers-outline" size={14} color={colors.accent} />
+                  <Ionicons name="layers-outline" size={14} color={mapChromeText.accent} />
                   <Text style={styles.title}>{t('map.layersTitle')}</Text>
                 </View>
                 <Pressable onPress={onClose} hitSlop={10} accessibilityLabel={t('common.close')}>
-                  <Ionicons name="close" size={18} color={colors.textSecondary} />
+                  <Ionicons name="close" size={18} color={mapChromeText.secondary} />
                 </Pressable>
               </View>
 
@@ -147,7 +161,7 @@ export function MapLayersSheet({
                 {!inServiceArea ? (
                   <Text style={styles.empty}>{t('map.layersOutOfArea')}</Text>
                 ) : loading ? (
-                  <ActivityIndicator color={colors.accent} size="small" style={styles.loader} />
+                  <ActivityIndicator color={mapChromeText.accent} size="small" style={styles.loader} />
                 ) : lines.length === 0 ? (
                   <Text style={styles.empty}>{t('map.layersNoLines')}</Text>
                 ) : (
@@ -165,7 +179,7 @@ export function MapLayersSheet({
                         }}
                         accessibilityLabel={t('map.layersClearLine')}
                       >
-                        <Ionicons name="close" size={12} color={colors.textSecondary} />
+                        <Ionicons name="close" size={12} color={mapChromeText.secondary} />
                       </Pressable>
                     ) : null}
                     {lines.map((line) => {
@@ -220,16 +234,24 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0, 0, 0, 0.28)',
   },
   anchor: {
-    paddingHorizontal: spacing.md,
+    paddingHorizontal: spacing.lg,
   },
   wrapper: {
     width: '100%',
   },
   sheet: {
+    borderRadius: 22,
+    overflow: 'hidden',
     paddingHorizontal: spacing.sm,
     paddingTop: spacing.sm,
     paddingBottom: spacing.sm,
     gap: spacing.xs,
+    backgroundColor: LAYERS_PANEL_TINT,
+  },
+  glassClip: {
+    ...StyleSheet.absoluteFillObject,
+    borderRadius: 22,
+    overflow: 'hidden',
   },
   header: {
     flexDirection: 'row',
@@ -237,6 +259,7 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     paddingHorizontal: spacing.xs,
     gap: spacing.sm,
+    zIndex: 1,
   },
   headerMain: {
     flex: 1,
@@ -246,13 +269,14 @@ const styles = StyleSheet.create({
   },
   title: {
     ...typography.labelMedium,
-    color: colors.textPrimary,
+    color: mapChromeText.primary,
     fontWeight: '600',
   },
   toggleRow: {
     flexDirection: 'row',
     gap: spacing.xs,
     paddingHorizontal: spacing.xs,
+    zIndex: 1,
   },
   layerChip: {
     flex: 1,
@@ -262,29 +286,30 @@ const styles = StyleSheet.create({
     gap: 5,
     borderRadius: radius.md,
     borderWidth: 1,
-    borderColor: 'transparent',
+    borderColor: MAP_CHROME_BORDER,
     paddingVertical: 7,
-    backgroundColor: 'rgba(255, 255, 255, 0.03)',
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
   },
   layerChipActive: {
-    borderColor: 'rgba(91, 141, 239, 0.35)',
-    backgroundColor: 'rgba(91, 141, 239, 0.08)',
+    borderColor: mapChromeText.accent,
+    backgroundColor: mapChromeText.accentMuted,
   },
   layerChipText: {
     ...typography.labelSmall,
-    color: colors.textSecondary,
+    color: mapChromeText.secondary,
     fontWeight: '600',
   },
   layerChipTextActive: {
-    color: colors.textPrimary,
+    color: mapChromeText.primary,
   },
   linesSection: {
     gap: 4,
     paddingHorizontal: spacing.xs,
+    zIndex: 1,
   },
   linesLabel: {
     ...typography.labelSmall,
-    color: colors.textTertiary,
+    color: mapChromeText.tertiary,
     fontSize: 10,
     textTransform: 'uppercase',
     letterSpacing: 0.4,
@@ -305,8 +330,8 @@ const styles = StyleSheet.create({
     minHeight: 28,
   },
   lineBadgeClear: {
-    borderColor: 'rgba(255, 255, 255, 0.15)',
-    backgroundColor: 'rgba(255, 255, 255, 0.04)',
+    borderColor: MAP_CHROME_BORDER,
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
     paddingHorizontal: 8,
   },
   lineDot: {
@@ -320,7 +345,7 @@ const styles = StyleSheet.create({
   },
   empty: {
     ...typography.labelSmall,
-    color: colors.textSecondary,
+    color: mapChromeText.secondary,
     paddingVertical: 4,
   },
   loader: {

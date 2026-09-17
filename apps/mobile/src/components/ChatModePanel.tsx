@@ -25,6 +25,7 @@ interface ChatModePanelProps {
   state: ChatSessionState;
   onSend: (text: string) => void;
   onQuickReply: (id: string) => void;
+  onClose?: () => void;
   onCloseItinerary?: () => void;
   showCloseItinerary?: boolean;
   bottomInset: number;
@@ -34,6 +35,7 @@ export function ChatModePanel({
   state,
   onSend,
   onQuickReply,
+  onClose,
   onCloseItinerary,
   showCloseItinerary = false,
 }: ChatModePanelProps) {
@@ -63,10 +65,10 @@ export function ChatModePanel({
 
   const choosingPlace = (state.pendingSuggestions?.length ?? 0) > 0;
   const headerLabel = state.destinationLabel ?? t('chat.title');
+  const canClose = Boolean(onClose || (showCloseItinerary && onCloseItinerary));
 
   return (
     <View style={styles.stack}>
-      {/* Fenêtre Q/R — même feuille que les propositions d’itinéraire */}
       <View style={styles.conversationWrap}>
         <View style={[mapGlassSurfaceStyles.panel, styles.sheet]}>
           <MapGlassBackground variant="dark" />
@@ -79,9 +81,9 @@ export function ChatModePanel({
               </Text>
               {state.busy ? <ActivityIndicator size="small" color={colors.accent} /> : null}
             </View>
-            {showCloseItinerary && onCloseItinerary ? (
+            {canClose ? (
               <Pressable
-                onPress={onCloseItinerary}
+                onPress={() => onClose?.()}
                 hitSlop={10}
                 accessibilityLabel={t('common.close')}
               >
@@ -129,13 +131,13 @@ export function ChatModePanel({
         </View>
       </View>
 
-      {/* Modes + champ : même gabarit / espacement que SearchBar mode carte */}
+      {/* Modes intégrés dans la barre (comme SearchBar) — pas en pleine largeur */}
       <View style={styles.searchBlock}>
-        <TransportModeFilters />
         <View style={styles.searchWrap}>
           <View style={[mapGlassSurfaceStyles.mapChromePanel, styles.searchPanel]}>
             <MapGlassBackground variant="mapChrome" />
             <View style={styles.searchRow}>
+              <TransportModeFilters />
               <Ionicons name="chatbubble-ellipses-outline" size={18} color={mapChromeText.tertiary} />
               <TextInput
                 style={styles.searchInput}
